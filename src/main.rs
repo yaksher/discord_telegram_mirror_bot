@@ -42,9 +42,6 @@ use telegram as t;
 
 const DISCORD_TOKEN_ENV: &str = "DISCORD_TOKEN";
 
-const TELEGRAM_CHAT_ID_RAW: &str = "-1002194364479";
-const DISCORD_CHAT_ID: u64 = 750971097054445651;
-
 struct DiscordState {
     telegram_bot: t::Bot,
     db: SqlitePool,
@@ -689,22 +686,6 @@ async fn main() {
         .expect("Err creating client");
 
     let discord_http = discord_client.http.clone();
-
-    let telegram_chat = telegram_bot
-        .get_chat(TELEGRAM_CHAT_ID_RAW.to_string())
-        .await
-        .expect("Err finding telegram chat")
-        .id;
-
-    let discord_chat = discord_http
-        .get_channel(d::ChannelId::from(DISCORD_CHAT_ID))
-        .await
-        .expect("Err finding discord chat")
-        .id();
-
-    db::insert_chat_mapping(discord_chat, telegram_chat)
-        .await
-        .expect("Failed to insert chat mapping");
 
     log::warn!("Starting telegram...");
 
