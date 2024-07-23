@@ -276,8 +276,14 @@ impl d::EventHandler for DiscordState {
                 let content = upd.content.as_deref().unwrap_or("");
                 let text = format::discord_to_telegram_format(content);
 
-                let msg_with_author =
-                    discord_request(|| ctx.http.get_message(upd.channel_id, upd.id), || ()).await;
+                let mut msg_with_author =
+                    ctx.cache.message(upd.channel_id, upd.id).map(|m| m.clone());
+
+                if msg_with_author.is_none() {
+                    msg_with_author =
+                        discord_request(|| ctx.http.get_message(upd.channel_id, upd.id), || ())
+                            .await;
+                }
 
                 let author = match msg_with_author {
                     Some(msg) => format::discord_author_name(&ctx, &msg).await,
