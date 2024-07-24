@@ -27,6 +27,20 @@ pub async fn init_db() -> Result<SqlitePool> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             discord_message_id BIGINT NOT NULL,
             telegram_message_id BIGINT NOT NULL,
+            telegram_chat_id BIGINT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS reaction_mapping (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_message_id BIGINT NOT NULL,
+            telegram_message_id BIGINT NOT NULL,
+            telegram_chat_id BIGINT NOT NULL,
+            reactions TEXT NOT NULL DEFAULT '{}',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )",
     )
@@ -45,12 +59,14 @@ pub async fn insert_mapping(
     pool: &SqlitePool,
     discord_message_id: d::MessageId,
     telegram_message_id: t::MessageId,
+    telegram_chat_id: t::ChatId,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO message_mapping (discord_message_id, telegram_message_id) VALUES (?, ?)",
+        "INSERT INTO message_mapping (discord_message_id, telegram_message_id, telegram_chat_id) VALUES (?, ?, ?)",
     )
     .bind(i64::from(discord_message_id))
     .bind(telegram_message_id.0 as i64)
+    .bind(telegram_chat_id.0)
     .execute(pool)
     .await?;
 
@@ -76,12 +92,15 @@ pub async fn get_telegram_message_id(
 pub async fn get_discord_message_id(
     pool: &SqlitePool,
     telegram_message_id: t::MessageId,
+    telegram_chat_id: t::ChatId,
 ) -> Result<Vec<d::MessageId>> {
-    let result =
-        sqlx::query("SELECT discord_message_id FROM message_mapping WHERE telegram_message_id = ?")
-            .bind(telegram_message_id.0 as i64)
-            .fetch_all(pool)
-            .await?;
+    let result = sqlx::query(
+        "SELECT discord_message_id FROM message_mapping WHERE telegram_message_id = ? AND telegram_chat_id = ?",
+    )
+    .bind(telegram_message_id.0 as i64)
+    .bind(telegram_chat_id.0)
+    .fetch_all(pool)
+    .await?;
 
     Ok(result
         .into_iter()
@@ -109,11 +128,13 @@ pub async fn delete_by_discord(
 pub async fn delete_by_telegram(
     pool: &SqlitePool,
     telegram_message_id: t::MessageId,
+    telegram_chat_id: t::ChatId,
 ) -> Result<Vec<d::MessageId>> {
     let result = sqlx::query(
-        "DELETE FROM message_mapping WHERE telegram_message_id = ? RETURNING discord_message_id",
+        "DELETE FROM message_mapping WHERE telegram_message_id = ? AND telegram_chat_id = ? RETURNING discord_message_id",
     )
     .bind(telegram_message_id.0 as i64)
+    .bind(telegram_chat_id.0)
     .fetch_all(pool)
     .await?;
 
@@ -121,6 +142,116 @@ pub async fn delete_by_telegram(
         .into_iter()
         .map(|row| d::MessageId::from(row.get::<i64, _>(0) as u64))
         .collect())
+}
+
+pub async fn insert_reaction_mapping(
+    pool: &SqlitePool,
+    discord_message_id: d::MessageId,
+    telegram_message_id: t::MessageId,
+    telegram_chat_id: t::ChatId,
+    reactions: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO reaction_mapping (discord_message_id, telegram_message_id, telegram_chat_id, reactions) VALUES (?, ?, ?, ?)",
+    )
+    .bind(i64::from(discord_message_id))
+    .bind(telegram_message_id.0 as i64)
+    .bind(telegram_chat_id.0)
+    .bind(reactions)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn get_telegram_reaction_message_id(
+    pool: &SqlitePool,
+    discord_message_id: d::MessageId,
+) -> Result<Option<(t::MessageId, String)>> {
+    let result = sqlx::query_as::<_, (i64, String)>(
+        "SELECT telegram_message_id, reactions FROM reaction_mapping WHERE discord_message_id = ?",
+    )
+    .bind(i64::from(discord_message_id))
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result.map(|(id, reactions)| (t::MessageId(id as i32), reactions)))
+}
+
+pub async fn get_discord_reaction_message_id(
+    pool: &SqlitePool,
+    telegram_message_id: t::MessageId,
+    telegram_chat_id: t::ChatId,
+) -> Result<Option<(d::MessageId, String)>> {
+    let result = sqlx::query_as::<_, (i64, String)>(
+        "SELECT discord_message_id, reactions FROM reaction_mapping WHERE telegram_message_id = ? AND telegram_chat_id = ?",
+    )
+    .bind(telegram_message_id.0 as i64)
+    .bind(telegram_chat_id.0)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result.map(|(id, reactions)| (d::MessageId::from(id as u64), reactions)))
+}
+
+pub async fn update_telegram_reaction_mapping(
+    pool: &SqlitePool,
+    discord_message_id: d::MessageId,
+    reactions: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE reaction_mapping SET reactions = ? WHERE discord_message_id = ?")
+        .bind(reactions)
+        .bind(i64::from(discord_message_id))
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+pub async fn update_discord_reaction_mapping(
+    pool: &SqlitePool,
+    telegram_message_id: t::MessageId,
+    telegram_chat_id: t::ChatId,
+    reactions: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE reaction_mapping SET reactions = ? WHERE telegram_message_id = ? AND telegram_chat_id = ?",
+    )
+    .bind(reactions)
+    .bind(telegram_message_id.0 as i64)
+    .bind(telegram_chat_id.0)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn remove_reaction_mapping_by_discord(
+    pool: &SqlitePool,
+    discord_message_id: d::MessageId,
+) -> Result<()> {
+    sqlx::query("DELETE FROM reaction_mapping WHERE discord_message_id = ?")
+        .bind(i64::from(discord_message_id))
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+pub async fn remove_reaction_mapping_by_telegram(
+    pool: &SqlitePool,
+    telegram_message_id: t::MessageId,
+    telegram_chat_id: t::ChatId,
+) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM reaction_mapping WHERE telegram_message_id = ? AND telegram_chat_id = ?",
+    )
+    .bind(telegram_message_id.0 as i64)
+    .bind(telegram_chat_id.0)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 fn load_chat_mappings() -> Result<()> {

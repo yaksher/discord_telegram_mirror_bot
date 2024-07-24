@@ -27,7 +27,7 @@ mod discord {
         builder::{CreateAttachment, CreateMessage, EditMessage},
         http::Http,
         model::{
-            channel::Message,
+            channel::{Message, Reaction, ReactionType},
             event::MessageUpdateEvent,
             gateway::Ready,
             id::{ChannelId, GuildId, MessageId},
@@ -138,7 +138,9 @@ impl d::EventHandler for DiscordState {
         .await;
 
         if let Some(telegram_msg) = telegram_result {
-            if let Err(e) = db::insert_mapping(&self.db, msg.id, telegram_msg.id).await {
+            if let Err(e) =
+                db::insert_mapping(&self.db, msg.id, telegram_msg.id, telegram_chat).await
+            {
                 log::error!("Failed to insert message mapping: {}", e);
             }
         }
@@ -179,7 +181,9 @@ impl d::EventHandler for DiscordState {
             .await;
             if let Some(telegram_result) = telegram_result {
                 for telegram_msg in telegram_result {
-                    if let Err(e) = db::insert_mapping(&self.db, msg.id, telegram_msg.id).await {
+                    if let Err(e) =
+                        db::insert_mapping(&self.db, msg.id, telegram_msg.id, telegram_chat).await
+                    {
                         log::error!("Failed to insert message mapping: {}", e);
                     }
                 }
@@ -235,7 +239,9 @@ impl d::EventHandler for DiscordState {
                         .await;
                     }
                     if let Some(telegram_msg) = telegram_msg {
-                        if let Err(e) = db::insert_mapping(&self.db, msg.id, telegram_msg.id).await
+                        if let Err(e) =
+                            db::insert_mapping(&self.db, msg.id, telegram_msg.id, telegram_chat)
+                                .await
                         {
                             log::error!("Failed to insert message mapping: {}", e);
                         }
@@ -374,6 +380,131 @@ impl d::EventHandler for DiscordState {
         }
     }
 
+    async fn reaction_add(&self, ctx: d::Context, reaction: d::Reaction) {
+        let Some(telegram_chat) = db::get_telegram_chat_id(reaction.channel_id) else {
+            log::info!("Got reaction {reaction:?} in unregistered discord channel");
+            return;
+        };
+        let d::ReactionType::Unicode(emoji) = &reaction.emoji else {
+            log::info!("Got reaction {reaction:?} with non-unicode emoji");
+            return;
+        };
+        let discord_id = reaction.message_id;
+        let telegram_id = match db::get_telegram_message_id(&self.db, discord_id)
+            .await
+            .as_deref()
+        {
+            Ok(&[telegram_id, ..]) => telegram_id,
+            Ok([]) => {
+                log::info!("Got reaction {reaction:?} with no known counterpart");
+                return;
+            }
+            Err(e) => {
+                log::error!("Failed to get telegram message id: {}", e);
+                return;
+            }
+        };
+        match db::get_telegram_reaction_message_id(&self.db, discord_id).await {
+            Ok(Some((reaction_message_id, reactions))) => {
+                // Reaction message exists, update it
+                let mut reactions = format::parse_telegram_reaction_message(&reactions);
+                let author = format::discord_reactor_name(&ctx, &reaction).await;
+                reactions.entry(author).or_default().push(emoji.clone());
+
+                let new_text = format::format_telegram_reaction_message(&reactions);
+
+                if let Some(_) = telegram_request!(self
+                    .telegram_bot
+                    .edit_message_text(telegram_chat, reaction_message_id, &new_text)
+                    .parse_mode(t::ParseMode::Html))
+                .await
+                {
+                    if let Err(e) =
+                        db::update_telegram_reaction_mapping(&self.db, discord_id, &new_text).await
+                    {
+                        log::error!("Failed to update reaction message mapping: {}", e);
+                    }
+                }
+            }
+            _ => {
+                // Reaction message doesn't exist, create a new one
+                let author = format::discord_reactor_name(&ctx, &reaction).await;
+                let text = format!("<b>Reactions</b>\n<b>{}</b>: {}", author, emoji);
+
+                if let Some(telegram_msg) = telegram_request!(self
+                    .telegram_bot
+                    .send_message(telegram_chat, &text)
+                    .parse_mode(t::ParseMode::Html)
+                    .reply_to_message_id(telegram_id))
+                .await
+                {
+                    if let Err(e) = db::insert_reaction_mapping(
+                        &self.db,
+                        discord_id,
+                        telegram_msg.id,
+                        telegram_chat,
+                        &text,
+                    )
+                    .await
+                    {
+                        log::error!("Failed to insert reaction message mapping: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn reaction_remove(&self, ctx: d::Context, reaction: d::Reaction) {
+        let Some(telegram_chat) = db::get_telegram_chat_id(reaction.channel_id) else {
+            log::info!("Got reaction {reaction:?} in unregistered discord channel");
+            return;
+        };
+        let d::ReactionType::Unicode(emoji) = &reaction.emoji else {
+            log::info!("Got reaction {reaction:?} with non-unicode emoji");
+            return;
+        };
+        let discord_id = reaction.message_id;
+        let author = format::discord_reactor_name(&ctx, &reaction).await;
+        match db::get_telegram_reaction_message_id(&self.db, discord_id).await {
+            Ok(Some((telegram_id, reactions))) => {
+                let mut reactions = format::parse_telegram_reaction_message(&reactions);
+                reactions.entry(author).or_default().retain(|e| e != emoji);
+                let new_text = format::format_telegram_reaction_message(&reactions);
+                if new_text == "<b>Reactions</b>" {
+                    if let Some(_) = telegram_request!(self
+                        .telegram_bot
+                        .delete_message(telegram_chat, telegram_id))
+                    .await
+                    {
+                        if let Err(e) =
+                            db::remove_reaction_mapping_by_discord(&self.db, discord_id).await
+                        {
+                            log::error!("Failed to remove reaction message mapping: {}", e);
+                        }
+                    }
+                } else {
+                    if let Some(_) = telegram_request!(self
+                        .telegram_bot
+                        .edit_message_text(telegram_chat, telegram_id, &new_text)
+                        .parse_mode(t::ParseMode::Html))
+                    .await
+                    {
+                        if let Err(e) =
+                            db::update_telegram_reaction_mapping(&self.db, discord_id, &new_text)
+                                .await
+                        {
+                            log::error!("Failed to update reaction message mapping: {}", e);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                log::info!("Got reaction removal {reaction:?} with no known counterpart");
+            }
+            Err(e) => log::error!("Failed to get reaction message mapping: {}", e),
+        }
+    }
+
     // Set a handler to be called on the `ready` event. This is called when a
     // shard is booted, and a READY payload is sent by Discord. This payload
     // contains data like the current user's guild Ids, current user data,
@@ -461,7 +592,7 @@ async fn handle_update(
 ) -> Result<(), eyre::Report> {
     log::info!("{upd:?}");
 
-    let Some(telegram_chat) = upd.chat() else {
+    let Some(telegram_chat) = upd.chat().cloned() else {
         log::error!("Got update {upd:?} without a chat");
         return Ok(());
     };
@@ -485,20 +616,21 @@ async fn handle_update(
             let mut message = d::CreateMessage::new();
 
             if let Some(ref_msg) = msg.reply_to_message() {
-                let found_mirror = match db::get_discord_message_id(&db_pool, ref_msg.id)
-                    .await
-                    .as_deref()
-                {
-                    Ok(&[mirror_id, ..]) => {
-                        message = message.reference_message((discord_chat, mirror_id));
-                        true
-                    }
-                    Ok([]) => false,
-                    Err(e) => {
-                        log::error!("Database lookup failed: {e}");
-                        false
-                    }
-                };
+                let found_mirror =
+                    match db::get_discord_message_id(&db_pool, ref_msg.id, telegram_chat.id)
+                        .await
+                        .as_deref()
+                    {
+                        Ok(&[mirror_id, ..]) => {
+                            message = message.reference_message((discord_chat, mirror_id));
+                            true
+                        }
+                        Ok([]) => false,
+                        Err(e) => {
+                            log::error!("Database lookup failed: {e}");
+                            false
+                        }
+                    };
                 if !found_mirror {
                     let ref_text = ref_msg.text().unwrap_or("").replace("\n", "\n> ");
                     let ref_author = format::telegram_author_name(ref_msg);
@@ -525,13 +657,15 @@ async fn handle_update(
             .await;
 
             if let Some(discord_msg) = discord_result {
-                if let Err(e) = db::insert_mapping(&db_pool, discord_msg.id, msg.id).await {
+                if let Err(e) =
+                    db::insert_mapping(&db_pool, discord_msg.id, msg.id, telegram_chat.id).await
+                {
                     log::error!("Failed to insert message mapping: {}", e);
                 }
             }
         }
         t::UpdateKind::EditedMessage(msg) => {
-            match db::get_discord_message_id(&db_pool, msg.id)
+            match db::get_discord_message_id(&db_pool, msg.id, telegram_chat.id)
                 .await
                 .as_deref()
             {
@@ -554,9 +688,13 @@ async fn handle_update(
                     let mut message = d::EditMessage::new();
 
                     if let Some(ref_msg) = msg.reply_to_message() {
-                        let found_mirror = match db::get_discord_message_id(&db_pool, ref_msg.id)
-                            .await
-                            .as_deref()
+                        let found_mirror = match db::get_discord_message_id(
+                            &db_pool,
+                            ref_msg.id,
+                            telegram_chat.id,
+                        )
+                        .await
+                        .as_deref()
                         {
                             Ok([]) => false,
                             Ok(_) => true,
@@ -586,7 +724,8 @@ async fn handle_update(
                     )
                     .await;
                 }
-                // the edited message had no known counterpart so do nothing
+                // the edited message had no known counterpart
+                // if the edit is a ., delete it for consistency
                 Ok([]) => {
                     if let (Some("."), _) | (_, Some(".")) =
                         (msg.text().as_deref(), msg.caption().as_deref())

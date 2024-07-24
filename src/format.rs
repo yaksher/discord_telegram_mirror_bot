@@ -65,6 +65,24 @@ pub async fn discord_author_name(ctx: &d::Context, msg: &d::Message) -> String {
         .unwrap_or_else(|| msg.author.name.clone())
 }
 
+pub async fn discord_reactor_name(ctx: &d::Context, reaction: &d::Reaction) -> String {
+    if let Some(member) = &reaction.member {
+        member
+            .nick
+            .clone()
+            .or_else(|| member.user.global_name.clone())
+            .unwrap_or_else(|| member.user.name.clone())
+    } else if let Some(user_id) = reaction.user_id {
+        user_id
+            .to_user(ctx)
+            .await
+            .map(|user| user.global_name.unwrap_or(user.name))
+            .unwrap_or_else(|_| "Unknown User".to_string())
+    } else {
+        "Unknown User".to_string()
+    }
+}
+
 pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityRef>) -> String {
     use std::collections::BTreeMap;
     let mut inserts: BTreeMap<usize, String> = BTreeMap::new();
@@ -181,4 +199,75 @@ pub fn telegram_author_name(msg: &t::Message) -> String {
         .map(|u| u.full_name())
         .or(msg.sender_chat().and_then(|c| c.title().map(Into::into)))
         .unwrap_or("Unknown".into())
+}
+
+pub fn parse_telegram_reaction_message(
+    text: &str,
+) -> std::collections::HashMap<String, Vec<String>> {
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                Some((
+                    parts[0]
+                        .trim_matches(|c: char| {
+                            c.is_whitespace() || c == '<' || c == '>' || c == 'b' || c == '/'
+                        })
+                        .to_string(),
+                    parts[1].split(',').map(|s| s.trim().to_string()).collect(),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub fn format_telegram_reaction_message(
+    reactions: &std::collections::HashMap<String, Vec<String>>,
+) -> String {
+    Some("<b>Reactions</b>".to_string())
+        .into_iter()
+        .chain(
+            reactions
+                .iter()
+                .filter(|(_, emojis)| !emojis.is_empty())
+                .map(|(user, emojis)| format!("<b>{}</b>: {}", user, emojis.join(", "))),
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn parse_discord_reaction_message(text: &str) -> std::collections::HashMap<String, String> {
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                Some((
+                    parts[0]
+                        .trim_matches(|c: char| c.is_whitespace() || c == '*' || c == '_')
+                        .to_string(),
+                    parts[1].trim().to_string(),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub fn format_discord_reaction_message(
+    reactions: &std::collections::HashMap<String, String>,
+) -> String {
+    Some("**Reactions**".to_string())
+        .into_iter()
+        .chain(
+            reactions
+                .iter()
+                .map(|(user, emoji)| format!("**{}**: {}", user, emoji)),
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
 }
