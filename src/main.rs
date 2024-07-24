@@ -22,6 +22,7 @@ use dotenv;
 #[allow(unused_imports)]
 mod discord {
     pub use serenity::{
+        all::{content_safe, ContentSafeOptions},
         async_trait,
         builder::{CreateAttachment, CreateMessage, EditMessage},
         http::Http,
@@ -82,7 +83,8 @@ impl d::EventHandler for DiscordState {
                 return;
             }
         };
-        let content = format::discord_to_telegram_format(&msg.content);
+        let content = d::content_safe(&ctx, &msg.content, &d::ContentSafeOptions::default(), &[]);
+        let content = format::discord_to_telegram_format(&content);
         let author = format::discord_author_name(&ctx, &msg).await;
 
         let mut text = format!("<b>{author}</b>\n{content}");
@@ -273,8 +275,13 @@ impl d::EventHandler for DiscordState {
             .as_deref()
         {
             Ok(&[mirror_id, ..]) => {
-                let content = upd.content.as_deref().unwrap_or("");
-                let text = format::discord_to_telegram_format(content);
+                let content = d::content_safe(
+                    &ctx,
+                    upd.content.as_deref().unwrap_or(""),
+                    &d::ContentSafeOptions::default(),
+                    &[],
+                );
+                let text = format::discord_to_telegram_format(&content);
 
                 let mut msg_with_author =
                     ctx.cache.message(upd.channel_id, upd.id).map(|m| m.clone());
