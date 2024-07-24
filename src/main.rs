@@ -632,7 +632,12 @@ async fn handle_update(
                         }
                     };
                 if !found_mirror {
-                    let ref_text = ref_msg.text().unwrap_or("").replace("\n", "\n> ");
+                    let ref_text = ref_msg
+                        .text()
+                        .zip(ref_msg.parse_entities())
+                        .map(|(t, e)| format::telegram_to_discord_format(t, e))
+                        .unwrap_or_default()
+                        .replace("\n", "\n> ");
                     let ref_author = format::telegram_author_name(ref_msg);
                     content = format!("> **{ref_author}**\n> {ref_text}\n{content}");
                 }
@@ -704,7 +709,12 @@ async fn handle_update(
                             }
                         };
                         if !found_mirror {
-                            let ref_text = ref_msg.text().unwrap_or("").replace("\n", "\n> ");
+                            let ref_text = ref_msg
+                                .text()
+                                .zip(ref_msg.parse_entities())
+                                .map(|(t, e)| format::telegram_to_discord_format(t, e))
+                                .unwrap_or_default()
+                                .replace("\n", "\n> ");
                             let ref_author = format::telegram_author_name(ref_msg);
                             content = format!("> **{ref_author}**\n> {ref_text}\n{content}");
                         }
