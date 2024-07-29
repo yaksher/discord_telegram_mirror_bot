@@ -2,6 +2,7 @@
 mod db;
 mod format;
 
+use dashmap::DashMap;
 use sqlx::SqlitePool;
 
 use std::{env, future::IntoFuture, sync::Arc, time::Duration};
@@ -24,13 +25,18 @@ mod discord {
     pub use serenity::{
         all::{content_safe, ContentSafeOptions},
         async_trait,
-        builder::{CreateAttachment, CreateMessage, EditMessage},
+        builder::{
+            CreateAllowedMentions, CreateAttachment, CreateMessage, CreateWebhook, EditMessage,
+            EditWebhookMessage, ExecuteWebhook,
+        },
+        cache::Cache,
         http::Http,
         model::{
             channel::{Message, Reaction, ReactionType},
             event::MessageUpdateEvent,
             gateway::Ready,
             id::{ChannelId, GuildId, MessageId},
+            webhook::{Webhook, WebhookChannel, WebhookGuild, WebhookType},
         },
         prelude::*,
         Error,
@@ -65,6 +71,12 @@ macro_rules! discord_request {
     };
 }
 
+macro_rules! log_helper {
+    ($($e:expr),*$(,)?) => {
+        log::error!(concat!("{}:{}\n", $(concat!(stringify!($e), ": {:?}\n")),*), file!(), line!(), $($e),*)
+    };
+}
+
 #[d::async_trait]
 impl d::EventHandler for DiscordState {
     // Set a handler for the `message` event - so that whenever a new message
@@ -74,6 +86,9 @@ impl d::EventHandler for DiscordState {
     // events can be dispatched simultaneously.
     async fn message(&self, ctx: d::Context, msg: d::Message) {
         if msg.author.id == ctx.cache.current_user().id {
+            return;
+        }
+        if msg.webhook_id.is_some() {
             return;
         }
         let telegram_chat = match db::get_telegram_chat_id(msg.channel_id) {
@@ -147,18 +162,7 @@ impl d::EventHandler for DiscordState {
                 s
             };
             (
-                telegram_request!(
-                    s.send_ref(),
-                    log::error!(
-                        "{}:{} Sender: {}\nText: {}\nFormatted: {}",
-                        file!(),
-                        line!(),
-                        author,
-                        msg.content,
-                        content
-                    )
-                )
-                .await,
+                telegram_request!(s.send_ref(), log_helper!(author, msg.content, content),).await,
                 true,
             )
         } else {
@@ -166,25 +170,14 @@ impl d::EventHandler for DiscordState {
                 .telegram_bot
                 .send_message(telegram_chat, text)
                 .parse_mode(t::ParseMode::Html);
-            let builder = if let Some(id) = reply_to_message_id {
+            let s = if let Some(id) = reply_to_message_id {
                 builder.reply_to_message_id(id)
             } else {
                 builder
             };
 
             (
-                telegram_request!(
-                    builder.send_ref(),
-                    log::error!(
-                        "{}:{} Sender: {}\nText: {}\nFormatted: {}",
-                        file!(),
-                        line!(),
-                        author,
-                        msg.content,
-                        content
-                    ),
-                )
-                .await,
+                telegram_request!(s.send_ref(), log_helper!(author, msg.content, content),).await,
                 false,
             )
         };
@@ -328,7 +321,14 @@ impl d::EventHandler for DiscordState {
             log::error!("Updates without an author id are currently unsupported.");
             return;
         }
+        if upd.webhook_id.is_none() {
+            log::error!("Updates without a webhook id are currently unsupported.");
+            return;
+        }
         if (&upd.author).as_ref().expect("author is checked").id == ctx.cache.current_user().id {
+            return;
+        }
+        if upd.webhook_id.expect("webhook id is checked").is_some() {
             return;
         }
         if upd.content.is_none() {
@@ -401,36 +401,16 @@ impl d::EventHandler for DiscordState {
                         .edit_message_text(telegram_chat, mirror_id, message_text)
                         .parse_mode(t::ParseMode::Html);
 
-                    telegram_request!(
-                        builder.send_ref(),
-                        log::error!(
-                            "{}:{}, Sender: {}\nText: {}\nFormatted: {}",
-                            file!(),
-                            line!(),
-                            author,
-                            content,
-                            text
-                        ),
-                    )
-                    .await;
+                    telegram_request!(builder.send_ref(), log_helper!(author, content, text),)
+                        .await;
                 } else {
                     let builder = self
                         .telegram_bot
                         .edit_message_caption(telegram_chat, mirror_id)
                         .caption(message_text)
                         .parse_mode(t::ParseMode::Html);
-                    telegram_request!(
-                        builder.send_ref(),
-                        log::error!(
-                            "{}:{}, Sender: {}\nText: {}\nFormatted: {}",
-                            file!(),
-                            line!(),
-                            author,
-                            content,
-                            text
-                        )
-                    )
-                    .await;
+                    telegram_request!(builder.send_ref(), log_helper!(author, content, text),)
+                        .await;
                 }
             }
             // the edited message had no known counterpart so do nothing
@@ -672,19 +652,66 @@ async fn handle_update(
     bot: t::Bot,
     upd: t::Update,
     discord_http: Arc<d::Http>,
+    discord_cache: Arc<d::Cache>,
+    webhook_cache: Arc<DashMap<d::ChannelId, d::Webhook>>,
     db_pool: SqlitePool,
 ) -> Result<(), eyre::Report> {
     log::info!("{upd:?}");
+
+    let cache_http = (&discord_cache, discord_http.as_ref());
 
     let Some(telegram_chat) = upd.chat().cloned() else {
         log::error!("Got update {upd:?} without a chat");
         return Ok(());
     };
-    let discord_chat = match db::get_discord_channel_id(telegram_chat.id) {
-        Some(chat_id) => chat_id,
-        None => {
-            log::info!("Got message {upd:?} in unregistered telegram chat");
-            return Ok(());
+    let Some((discord_chat, webhook_url)) = db::get_discord_channel_id(telegram_chat.id) else {
+        log::info!("Got message {upd:?} in unregistered telegram chat");
+        return Ok(());
+    };
+
+    let cached_webhook = webhook_cache.get(&discord_chat).map(|w| w.clone());
+
+    let webhook = match (cached_webhook, webhook_url) {
+        (Some(webhook), _) => webhook,
+        (None, Some(url)) => {
+            let webhook =
+                discord_request!(d::Webhook::from_url(discord_http.clone(), url.as_str())).await;
+            match webhook {
+                Some(webhook) => {
+                    webhook_cache.insert(discord_chat, webhook.clone());
+                    webhook
+                }
+                None => {
+                    log::error!("Failed to get webhook");
+                    return Ok(());
+                }
+            }
+        }
+        (None, None) => {
+            let make_webhook = d::CreateWebhook::new("Discogram");
+            let webhook = discord_request!(
+                discord_chat.create_webhook(discord_http.clone(), make_webhook.clone())
+            )
+            .await;
+            match webhook {
+                Some(webhook) => {
+                    if let Err(e) = db::set_chat_mapping(
+                        discord_chat,
+                        telegram_chat.id,
+                        Some(webhook.url().expect("Bot running without token")),
+                    )
+                    .await
+                    {
+                        log::error!("Failed to insert chat mapping: {}", e);
+                    }
+                    webhook_cache.insert(discord_chat, webhook.clone());
+                    webhook
+                }
+                None => {
+                    log::error!("Failed to create webhook");
+                    return Ok(());
+                }
+            }
         }
     };
 
@@ -696,56 +723,83 @@ async fn handle_update(
                 .zip(msg.parse_entities())
                 .or_else(|| msg.caption().zip(msg.parse_caption_entities()))
                 .map(|(t, e)| format::telegram_to_discord_format(t, e));
-            let mut content = format!("**{author}**\n{}", text.as_deref().unwrap_or(""));
-            let mut message = d::CreateMessage::new();
+            // let mut content = format!("**{author}**\n{}", text.as_deref().unwrap_or(""));
+            let mut content = text.unwrap_or_default();
+            let mut mentions = d::CreateAllowedMentions::new();
 
             if let Some(ref_msg) = msg.reply_to_message() {
-                let found_mirror =
-                    match db::get_discord_message_id(&db_pool, ref_msg.id, telegram_chat.id)
-                        .await
-                        .as_deref()
-                    {
-                        Ok(&[mirror_id, ..]) => {
-                            message = message.reference_message((discord_chat, mirror_id));
-                            true
+                let mut ref_author_id = None;
+                let mut ref_link = None;
+                let mut ref_disc_message = None;
+
+                match db::get_discord_message_id(&db_pool, ref_msg.id, telegram_chat.id)
+                    .await
+                    .as_deref()
+                {
+                    Ok(&[mirror_id, ..]) => {
+                        let discord_channel = discord_chat.to_channel(cache_http).await?;
+
+                        ref_disc_message = discord_cache
+                            .message(discord_channel, mirror_id)
+                            .map(|msg| msg.clone());
+                        if ref_disc_message.is_none() {
+                            ref_disc_message =
+                                discord_request!(discord_http.get_message(discord_chat, mirror_id))
+                                    .await;
                         }
-                        Ok([]) => false,
-                        Err(e) => {
-                            log::error!("Database lookup failed: {e}");
-                            false
-                        }
-                    };
-                if !found_mirror {
-                    let ref_text = ref_msg
+                        ref_author_id = ref_disc_message.as_ref().map(|msg| msg.author.id);
+                        ref_link =
+                            Some(mirror_id.link_ensured(cache_http, discord_chat, None).await);
+                    }
+                    Ok([]) => {}
+                    Err(e) => {
+                        log::error!("Database lookup failed: {e}");
+                    }
+                }
+                let ref_text = if let Some(disc_message) = ref_disc_message {
+                    disc_message.content.replace("\n", "\n> ")
+                } else {
+                    ref_msg
                         .text()
                         .zip(ref_msg.parse_entities())
                         .map(|(t, e)| format::telegram_to_discord_format(t, e))
                         .unwrap_or_default()
-                        .replace("\n", "\n> ");
-                    let ref_author = format::telegram_author_name(ref_msg);
-                    content = format!("> **{ref_author}**\n> {ref_text}\n{content}");
-                }
+                        .replace("\n", "\n> ")
+                };
+                let ref_author = if let Some(author_id) = ref_author_id {
+                    let mention = author_id.mention();
+                    mentions = mentions.users(Some(author_id));
+                    mention.to_string()
+                } else {
+                    format::telegram_author_name(ref_msg)
+                };
+                let reply_str = if let Some(link) = ref_link {
+                    format!("[replying to]({link})")
+                } else {
+                    "replying to".to_string()
+                };
+                content = format!("**{reply_str} {ref_author}**\n> {ref_text}\n{content}");
             }
-            message = message.content(&content);
+            let mut message = d::ExecuteWebhook::new()
+                .content(&content)
+                .allowed_mentions(mentions)
+                .username(&author);
 
             if let Some(attachment) = get_telegram_attachment_as_discord(&bot, &msg).await {
                 message = message.add_file(attachment);
             }
 
+            // if let Some((ref_discord_chat, ref_discord_id)) = reference_message {
+            //     message = message.reference_message((ref_discord_chat, ref_discord_id));
+            // }
+
             let discord_result = discord_request!(
-                discord_chat.send_message(discord_http.clone(), message.clone()),
-                log::error!(
-                    "{}:{} Sender: {}\nText: {}\nFormatted: {}",
-                    file!(),
-                    line!(),
-                    author,
-                    msg.text().unwrap_or(""),
-                    content
-                )
+                webhook.execute(discord_http.clone(), true, message.clone()),
+                log_helper!(author, msg.text().unwrap_or(""), content)
             )
             .await;
 
-            if let Some(discord_msg) = discord_result {
+            if let Some(Some(discord_msg)) = discord_result {
                 if let Err(e) =
                     db::insert_mapping(&db_pool, discord_msg.id, msg.id, telegram_chat.id, false)
                         .await
@@ -767,55 +821,88 @@ async fn handle_update(
                         .map(|(t, e)| format::telegram_to_discord_format(t, e));
                     if let Some(".") = text.as_deref() {
                         telegram_request!(bot.delete_message(msg.chat.id, msg.id)).await;
-                        discord_request!(
-                            discord_chat.delete_message(discord_http.clone(), mirror_id)
-                        )
+                        let discord_result = discord_request!(webhook.delete_message(
+                            discord_http.clone(),
+                            None,
+                            mirror_id
+                        ))
                         .await;
+                        if let Some(()) = discord_result {
+                            if let Err(e) =
+                                db::delete_by_telegram(&db_pool, msg.id, telegram_chat.id).await
+                            {
+                                log::error!("Failed to delete message mapping: {}", e);
+                            }
+                        }
                         return Ok(());
                     }
                     let author = format::telegram_author_name(&msg);
-                    let mut content = format!("**{author}**\n{}", text.as_deref().unwrap_or(""));
-                    let mut message = d::EditMessage::new();
+                    let mut content = text.unwrap_or_default();
+                    let mut mentions = d::CreateAllowedMentions::new();
 
                     if let Some(ref_msg) = msg.reply_to_message() {
-                        let found_mirror = match db::get_discord_message_id(
-                            &db_pool,
-                            ref_msg.id,
-                            telegram_chat.id,
-                        )
-                        .await
-                        .as_deref()
+                        let mut ref_author_id = None;
+                        let mut ref_link = None;
+                        let mut ref_disc_message = None;
+
+                        match db::get_discord_message_id(&db_pool, ref_msg.id, telegram_chat.id)
+                            .await
+                            .as_deref()
                         {
-                            Ok([]) => false,
-                            Ok(_) => true,
+                            Ok(&[mirror_id, ..]) => {
+                                let discord_channel = discord_chat.to_channel(cache_http).await?;
+
+                                ref_disc_message = discord_cache
+                                    .message(discord_channel, mirror_id)
+                                    .map(|msg| msg.clone());
+                                if ref_disc_message.is_none() {
+                                    ref_disc_message = discord_request!(
+                                        discord_http.get_message(discord_chat, mirror_id)
+                                    )
+                                    .await;
+                                }
+                                ref_author_id = ref_disc_message.as_ref().map(|msg| msg.author.id);
+                                ref_link = Some(
+                                    mirror_id.link_ensured(cache_http, discord_chat, None).await,
+                                );
+                            }
+                            Ok([]) => {}
                             Err(e) => {
                                 log::error!("Database lookup failed: {e}");
-                                false
                             }
-                        };
-                        if !found_mirror {
-                            let ref_text = ref_msg
+                        }
+                        let ref_text = if let Some(disc_message) = ref_disc_message {
+                            disc_message.content.replace("\n", "\n> ")
+                        } else {
+                            ref_msg
                                 .text()
                                 .zip(ref_msg.parse_entities())
                                 .map(|(t, e)| format::telegram_to_discord_format(t, e))
                                 .unwrap_or_default()
-                                .replace("\n", "\n> ");
-                            let ref_author = format::telegram_author_name(ref_msg);
-                            content = format!("> **{ref_author}**\n> {ref_text}\n{content}");
-                        }
+                                .replace("\n", "\n> ")
+                        };
+                        let ref_author = if let Some(author_id) = ref_author_id {
+                            let mention = author_id.mention();
+                            mentions = mentions.users(Some(author_id));
+                            mention.to_string()
+                        } else {
+                            format::telegram_author_name(ref_msg)
+                        };
+                        let reply_str = if let Some(link) = ref_link {
+                            format!("[replying to]({link})")
+                        } else {
+                            "replying to".to_string()
+                        };
+                        content = format!("**{reply_str} {ref_author}**\n> {ref_text}\n{content}");
                     }
-                    message = message.content(&content);
+
+                    let message = d::EditWebhookMessage::new()
+                        .content(&content)
+                        .allowed_mentions(mentions);
 
                     discord_request!(
-                        discord_chat.edit_message(discord_http.clone(), mirror_id, message.clone()),
-                        log::error!(
-                            "{}:{} Sender: {}\nText: {}\nFormatted: {}",
-                            file!(),
-                            line!(),
-                            author,
-                            msg.text().unwrap_or(""),
-                            content
-                        ),
+                        webhook.edit_message(cache_http, mirror_id, message.clone()),
+                        log_helper!(author, msg.text().unwrap_or(""), content)
                     )
                     .await;
                 }
@@ -886,6 +973,12 @@ where
     loop {
         match f().await {
             Ok(x) => break Some(x),
+            // this specific variant of HttpError is not a retryable error
+            Err(why @ d::Error::Http(d::HttpError::UnsuccessfulRequest(_))) => {
+                log::error!("Failed discord request: {why:?}");
+                log();
+                break None;
+            }
             Err(why @ (d::Error::Gateway(_) | d::Error::Http(_))) => {
                 if retries == 0 {
                     log::error!("Failed discord request: {why:?}");
@@ -932,14 +1025,22 @@ async fn main() {
         .await
         .expect("Err creating client");
 
+    let discord_cache = discord_client.cache.clone();
     let discord_http = discord_client.http.clone();
 
     log::warn!("Starting telegram...");
 
+    let webhook_cache = Arc::new(DashMap::<d::ChannelId, d::Webhook>::new());
+
     let telegram_handler = endpoint(handle_update);
 
     let mut telegram_dispatch = Dispatcher::builder(telegram_bot, telegram_handler)
-        .dependencies(dptree::deps![discord_http, db_pool])
+        .dependencies(dptree::deps![
+            webhook_cache,
+            discord_cache,
+            discord_http,
+            db_pool
+        ])
         .enable_ctrlc_handler()
         .build();
 
