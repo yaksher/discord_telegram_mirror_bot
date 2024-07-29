@@ -28,6 +28,7 @@ pub async fn init_db() -> Result<SqlitePool> {
             discord_message_id BIGINT NOT NULL,
             telegram_message_id BIGINT NOT NULL,
             telegram_chat_id BIGINT NOT NULL,
+            has_caption BOOLEAN NOT NULL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )",
     )
@@ -60,13 +61,15 @@ pub async fn insert_mapping(
     discord_message_id: d::MessageId,
     telegram_message_id: t::MessageId,
     telegram_chat_id: t::ChatId,
+    has_caption: bool,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO message_mapping (discord_message_id, telegram_message_id, telegram_chat_id) VALUES (?, ?, ?)",
+        "INSERT INTO message_mapping (discord_message_id, telegram_message_id, telegram_chat_id, has_caption) VALUES (?, ?, ?, ?)",
     )
     .bind(i64::from(discord_message_id))
     .bind(telegram_message_id.0 as i64)
     .bind(telegram_chat_id.0)
+    .bind(has_caption)
     .execute(pool)
     .await?;
 
@@ -76,16 +79,22 @@ pub async fn insert_mapping(
 pub async fn get_telegram_message_id(
     pool: &SqlitePool,
     discord_message_id: d::MessageId,
-) -> Result<Vec<t::MessageId>> {
-    let result =
-        sqlx::query("SELECT telegram_message_id FROM message_mapping WHERE discord_message_id = ?")
-            .bind(i64::from(discord_message_id))
-            .fetch_all(pool)
-            .await?;
+) -> Result<Vec<(t::MessageId, bool)>> {
+    let result = sqlx::query(
+        "SELECT telegram_message_id, has_caption FROM message_mapping WHERE discord_message_id = ?",
+    )
+    .bind(i64::from(discord_message_id))
+    .fetch_all(pool)
+    .await?;
 
     Ok(result
         .into_iter()
-        .map(|row| t::MessageId(row.get::<i64, _>(0) as i32))
+        .map(|row| {
+            (
+                t::MessageId(row.get::<i64, _>(0) as i32),
+                row.get::<bool, _>(1),
+            )
+        })
         .collect())
 }
 

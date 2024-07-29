@@ -89,10 +89,7 @@ impl d::EventHandler for DiscordState {
 
         let mut text = format!("<b>{author}</b>\n{content}");
 
-        let mut builder = self
-            .telegram_bot
-            .send_message(telegram_chat, "")
-            .parse_mode(t::ParseMode::Html);
+        let mut reply_to_message_id = None;
 
         if let Some(ref_msg) = msg.referenced_message.clone() {
             // if a message is being replied to, find the original message in
@@ -101,8 +98,8 @@ impl d::EventHandler for DiscordState {
                 .await
                 .as_deref()
             {
-                Ok(&[mirror_id, ..]) => {
-                    builder = builder.reply_to_message_id(mirror_id);
+                Ok(&[(mirror_id, _), ..]) => {
+                    reply_to_message_id = Some(mirror_id);
                     true
                 }
                 Ok([]) => false,
@@ -122,27 +119,84 @@ impl d::EventHandler for DiscordState {
             }
         }
 
-        let builder = builder.text(text);
+        let (telegram_result, one_image) = if msg.attachments.len() == 1
+            && msg.attachments[0]
+                .content_type
+                .as_deref()
+                .is_some_and(|t| t.starts_with("image/"))
+        {
+            let a = &msg.attachments[0];
+            let url = match Url::parse(a.url.as_str()) {
+                Ok(url) => url,
+                Err(e) => {
+                    log::error!("Failed to parse attachment url: {e}");
+                    return;
+                }
+            };
+            let f = t::InputFile::url(url.clone())
+                .file_name(a.filename.trim_start_matches("SPOILER_").to_string());
+            let s = self
+                .telegram_bot
+                .send_photo(telegram_chat, f)
+                .has_spoiler(a.filename.starts_with("SPOILER_"))
+                .caption(text)
+                .parse_mode(t::ParseMode::Html);
+            let s = if let Some(id) = reply_to_message_id {
+                s.reply_to_message_id(id)
+            } else {
+                s
+            };
+            (
+                telegram_request!(
+                    s.clone(),
+                    log::error!(
+                        "{}:{} Sender: {}\nText: {}\nFormatted: {}",
+                        file!(),
+                        line!(),
+                        author,
+                        msg.content,
+                        content
+                    )
+                )
+                .await,
+                true,
+            )
+        } else {
+            let builder = self.telegram_bot.send_message(telegram_chat, text);
+            let builder = if let Some(id) = reply_to_message_id {
+                builder.reply_to_message_id(id)
+            } else {
+                builder
+            };
 
-        let telegram_result = telegram_request!(
-            builder.clone(),
-            log::error!(
-                "{}:{} Sender: {}\nText: {}\nFormatted: {}",
-                file!(),
-                line!(),
-                author,
-                msg.content,
-                content
-            ),
-        )
-        .await;
+            (
+                telegram_request!(
+                    builder.clone(),
+                    log::error!(
+                        "{}:{} Sender: {}\nText: {}\nFormatted: {}",
+                        file!(),
+                        line!(),
+                        author,
+                        msg.content,
+                        content
+                    ),
+                )
+                .await,
+                false,
+            )
+        };
 
         if let Some(telegram_msg) = telegram_result {
             if let Err(e) =
-                db::insert_mapping(&self.db, msg.id, telegram_msg.id, telegram_chat).await
+                db::insert_mapping(&self.db, msg.id, telegram_msg.id, telegram_chat, one_image)
+                    .await
             {
                 log::error!("Failed to insert message mapping: {}", e);
             }
+        }
+
+        if one_image {
+            return;
         }
 
         if msg.attachments.iter().all(|a| {
@@ -151,7 +205,7 @@ impl d::EventHandler for DiscordState {
                 .is_some_and(|t| t.starts_with("image/"))
         }) && msg.attachments.len() > 1
         {
-            let telegram_result = telegram_request!(self.telegram_bot.send_media_group(
+            let builder = self.telegram_bot.send_media_group(
                 telegram_chat,
                 msg.attachments
                     .iter()
@@ -163,10 +217,12 @@ impl d::EventHandler for DiscordState {
                     })
                     .map(t::InputFile::url)
                     .zip(msg.attachments.iter())
-                    .map(|(m, a)| (
-                        m.file_name(a.filename.trim_start_matches("SPOILER_").to_string()),
-                        a.filename.starts_with("SPOILER_")
-                    ))
+                    .map(|(m, a)| {
+                        (
+                            m.file_name(a.filename.trim_start_matches("SPOILER_").to_string()),
+                            a.filename.starts_with("SPOILER_"),
+                        )
+                    })
                     .map(|(m, s)| {
                         let m = t::InputMediaPhoto::new(m);
                         if s {
@@ -177,12 +233,13 @@ impl d::EventHandler for DiscordState {
                     })
                     .map(t::InputMedia::Photo)
                     .collect::<Vec<_>>(),
-            ))
-            .await;
+            );
+            let telegram_result = telegram_request!(builder.send_ref()).await;
             if let Some(telegram_result) = telegram_result {
                 for telegram_msg in telegram_result {
                     if let Err(e) =
-                        db::insert_mapping(&self.db, msg.id, telegram_msg.id, telegram_chat).await
+                        db::insert_mapping(&self.db, msg.id, telegram_msg.id, telegram_chat, true)
+                            .await
                     {
                         log::error!("Failed to insert message mapping: {}", e);
                     }
@@ -209,7 +266,7 @@ impl d::EventHandler for DiscordState {
                                 .telegram_bot
                                 .send_photo(telegram_chat, f)
                                 .has_spoiler(a.filename.starts_with("SPOILER_"));
-                            telegram_msg = telegram_request!(s.clone()).await;
+                            telegram_msg = telegram_request!(s.send_ref()).await;
                             true
                         } else if kind.starts_with("video/") {
                             let f = t::InputFile::url(url.clone())
@@ -218,7 +275,7 @@ impl d::EventHandler for DiscordState {
                                 .telegram_bot
                                 .send_video(telegram_chat, f)
                                 .has_spoiler(a.filename.starts_with("SPOILER_"));
-                            telegram_msg = telegram_request!(s.clone()).await;
+                            telegram_msg = telegram_request!(s.send_ref()).await;
                             true
                         } else if kind.starts_with("audio/") {
                             telegram_msg = telegram_request!(self
@@ -239,9 +296,14 @@ impl d::EventHandler for DiscordState {
                         .await;
                     }
                     if let Some(telegram_msg) = telegram_msg {
-                        if let Err(e) =
-                            db::insert_mapping(&self.db, msg.id, telegram_msg.id, telegram_chat)
-                                .await
+                        if let Err(e) = db::insert_mapping(
+                            &self.db,
+                            msg.id,
+                            telegram_msg.id,
+                            telegram_chat,
+                            true,
+                        )
+                        .await
                         {
                             log::error!("Failed to insert message mapping: {}", e);
                         }
@@ -280,7 +342,7 @@ impl d::EventHandler for DiscordState {
             .await
             .as_deref()
         {
-            Ok(&[mirror_id, ..]) => {
+            Ok(&[(mirror_id, has_caption), ..]) => {
                 let content = d::content_safe(
                     &ctx,
                     upd.content.as_deref().unwrap_or(""),
@@ -303,10 +365,6 @@ impl d::EventHandler for DiscordState {
                     None => "Unknown".into(),
                 };
                 let mut message_text = format!("<b>{author}</b>\n{text}");
-                let mut builder = self
-                    .telegram_bot
-                    .edit_message_text(telegram_chat, mirror_id, "")
-                    .parse_mode(t::ParseMode::Html);
 
                 if let Some(ref_msg_id) = upd
                     .referenced_message
@@ -334,20 +392,43 @@ impl d::EventHandler for DiscordState {
                         }
                     }
                 }
-                builder = builder.text(message_text);
+                if !has_caption {
+                    let builder = self
+                        .telegram_bot
+                        .edit_message_text(telegram_chat, mirror_id, message_text)
+                        .parse_mode(t::ParseMode::Html);
 
-                telegram_request!(
-                    builder.clone(),
-                    log::error!(
-                        "{}:{}, Sender: {}\nText: {}\nFormatted: {}",
-                        file!(),
-                        line!(),
-                        author,
-                        content,
-                        text
-                    ),
-                )
-                .await;
+                    telegram_request!(
+                        builder.send_ref(),
+                        log::error!(
+                            "{}:{}, Sender: {}\nText: {}\nFormatted: {}",
+                            file!(),
+                            line!(),
+                            author,
+                            content,
+                            text
+                        ),
+                    )
+                    .await;
+                } else {
+                    let builder = self
+                        .telegram_bot
+                        .edit_message_caption(telegram_chat, mirror_id)
+                        .caption(message_text)
+                        .parse_mode(t::ParseMode::Html);
+                    telegram_request!(
+                        builder.send_ref(),
+                        log::error!(
+                            "{}:{}, Sender: {}\nText: {}\nFormatted: {}",
+                            file!(),
+                            line!(),
+                            author,
+                            content,
+                            text
+                        )
+                    )
+                    .await;
+                }
             }
             // the edited message had no known counterpart so do nothing
             Ok([]) => {}
@@ -394,7 +475,7 @@ impl d::EventHandler for DiscordState {
             .await
             .as_deref()
         {
-            Ok(&[telegram_id, ..]) => telegram_id,
+            Ok(&[(telegram_id, _), ..]) => telegram_id,
             Ok([]) => {
                 log::info!("Got reaction {reaction:?} with no known counterpart");
                 return;
@@ -663,7 +744,8 @@ async fn handle_update(
 
             if let Some(discord_msg) = discord_result {
                 if let Err(e) =
-                    db::insert_mapping(&db_pool, discord_msg.id, msg.id, telegram_chat.id).await
+                    db::insert_mapping(&db_pool, discord_msg.id, msg.id, telegram_chat.id, false)
+                        .await
                 {
                     log::error!("Failed to insert message mapping: {}", e);
                 }
