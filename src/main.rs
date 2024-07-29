@@ -148,7 +148,7 @@ impl d::EventHandler for DiscordState {
             };
             (
                 telegram_request!(
-                    s.clone(),
+                    s.send_ref(),
                     log::error!(
                         "{}:{} Sender: {}\nText: {}\nFormatted: {}",
                         file!(),
@@ -171,7 +171,7 @@ impl d::EventHandler for DiscordState {
 
             (
                 telegram_request!(
-                    builder.clone(),
+                    builder.send_ref(),
                     log::error!(
                         "{}:{} Sender: {}\nText: {}\nFormatted: {}",
                         file!(),
