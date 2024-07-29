@@ -162,7 +162,10 @@ impl d::EventHandler for DiscordState {
                 true,
             )
         } else {
-            let builder = self.telegram_bot.send_message(telegram_chat, text);
+            let builder = self
+                .telegram_bot
+                .send_message(telegram_chat, text)
+                .parse_mode(t::ParseMode::Html);
             let builder = if let Some(id) = reply_to_message_id {
                 builder.reply_to_message_id(id)
             } else {
