@@ -2274,6 +2274,7 @@ checksum = "20f34339676cdcab560c9a82300c4c2581f68b9369aedf0fae86f2ff9565ff3e"
 name = "telediscord"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dashmap 6.0.1",
  "discord-md",
  "dotenv",

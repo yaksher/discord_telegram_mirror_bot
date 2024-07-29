@@ -4,6 +4,7 @@ mod format;
 
 use dashmap::DashMap;
 use sqlx::SqlitePool;
+use tokio::time::Instant;
 
 use std::{env, future::IntoFuture, sync::Arc, time::Duration};
 
@@ -48,6 +49,7 @@ use discord as d;
 use telegram as t;
 
 const DISCORD_TOKEN_ENV: &str = "DISCORD_TOKEN";
+const DISCORD_IMAGE_CHANNEL: d::ChannelId = d::ChannelId::new(1267352463158153216);
 
 struct DiscordState {
     telegram_bot: t::Bot,
@@ -648,9 +650,74 @@ async fn get_telegram_attachment_as_discord(bot: &t::Bot, msg: &t::Message) -> O
     }
 }
 
+#[derive(Clone, Debug)]
+struct AvatarCacheRecord {
+    url: Arc<str>, // usually a base64 encoded image
+    last_updated: Instant,
+}
+
+async fn get_avatar_url(
+    bot: &t::Bot,
+    cache: &DashMap<t::UserId, AvatarCacheRecord>,
+    user_id: t::UserId,
+    discord_http: Arc<d::Http>,
+) -> Option<Arc<str>> {
+    const CACHE_LIFETIME: Duration = Duration::from_secs(60 * 60);
+    let record = cache.get(&user_id);
+    let now = Instant::now();
+    if let Some(record) = record {
+        if record.last_updated + CACHE_LIFETIME > now {
+            return Some(record.url.clone());
+        }
+    }
+    // There was no record, or the record was invalid, we need to fetch the image
+
+    let photos = telegram_request!(bot.get_user_profile_photos(user_id).limit(1)).await;
+    let photo = photos.and_then(|photos| {
+        photos
+            .photos
+            .get(0)
+            .and_then(|sizes| sizes.iter().last().cloned())
+    })?;
+    let file = telegram_request!(bot.get_file(&photo.file.id)).await?;
+    let t::File {
+        path,
+        meta: t::FileMeta { size, .. },
+        ..
+    } = file;
+    let mut buf = Vec::with_capacity(size as usize);
+    if let Err(e) = bot.download_file(&path, &mut buf).await {
+        log::error!("Failed to download file: {e:?}");
+        return None;
+    }
+
+    let files = vec![d::CreateAttachment::bytes(buf, "avatar.jpg")];
+    let builder = d::CreateMessage::new().add_files(files.clone());
+    let message = discord_request!(
+        DISCORD_IMAGE_CHANNEL.send_message(discord_http.as_ref(), builder.clone())
+    )
+    .await?;
+    let url: Arc<str> = message
+        .attachments
+        .first()
+        .map(|a| Arc::from(a.url.as_str()))
+        .or_else(|| {
+            log::error!("Failed to get avatar URL");
+            None
+        })?;
+
+    let record = AvatarCacheRecord {
+        url: url.clone(),
+        last_updated: Instant::now(),
+    };
+    cache.insert(user_id, record);
+    Some(url)
+}
+
 async fn handle_update(
     bot: t::Bot,
     me: t::Me,
+    avatar_cache: Arc<DashMap<t::UserId, AvatarCacheRecord>>,
     upd: t::Update,
     discord_http: Arc<d::Http>,
     discord_cache: Arc<d::Cache>,
@@ -727,6 +794,18 @@ async fn handle_update(
             // let mut content = format!("**{author}**\n{}", text.as_deref().unwrap_or(""));
             let mut content = text.unwrap_or_default();
             let mut mentions = d::CreateAllowedMentions::new();
+            let avatar_handle = {
+                let bot = bot.clone();
+                let avatar_cache = avatar_cache.clone();
+                let from = msg.from().cloned();
+                let discord_http = discord_http.clone();
+                tokio::spawn(async move {
+                    match from {
+                        Some(u) => get_avatar_url(&bot, &avatar_cache, u.id, discord_http).await,
+                        None => None,
+                    }
+                })
+            };
 
             if let Some(ref_msg) = msg.reply_to_message() {
                 let mut ref_author_id = None;
@@ -803,9 +882,9 @@ async fn handle_update(
                 message = message.add_file(attachment);
             }
 
-            // if let Some((ref_discord_chat, ref_discord_id)) = reference_message {
-            //     message = message.reference_message((ref_discord_chat, ref_discord_id));
-            // }
+            if let Ok(Some(avatar_url)) = avatar_handle.await {
+                message = message.avatar_url(&*avatar_url);
+            }
 
             let discord_result = discord_request!(
                 webhook.execute(discord_http.clone(), true, message.clone()),
@@ -1058,12 +1137,14 @@ async fn main() {
     log::warn!("Starting telegram...");
 
     let webhook_cache = Arc::new(DashMap::<d::ChannelId, d::Webhook>::new());
+    let avatar_cache = Arc::new(DashMap::<t::UserId, AvatarCacheRecord>::new());
 
     let telegram_handler = endpoint(handle_update);
 
     let mut telegram_dispatch = Dispatcher::builder(telegram_bot, telegram_handler)
         .dependencies(dptree::deps![
             webhook_cache,
+            avatar_cache,
             discord_cache,
             discord_http,
             db_pool
