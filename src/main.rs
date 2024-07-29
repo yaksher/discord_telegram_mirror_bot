@@ -650,6 +650,7 @@ async fn get_telegram_attachment_as_discord(bot: &t::Bot, msg: &t::Message) -> O
 
 async fn handle_update(
     bot: t::Bot,
+    me: t::Me,
     upd: t::Update,
     discord_http: Arc<d::Http>,
     discord_cache: Arc<d::Cache>,
@@ -730,7 +731,7 @@ async fn handle_update(
             if let Some(ref_msg) = msg.reply_to_message() {
                 let mut ref_author_id = None;
                 let mut ref_link = None;
-                let mut ref_disc_message = None;
+                let ref_sender_telegram = ref_msg.from().map(|f| f.id) != Some(me.id);
 
                 match db::get_discord_message_id(&db_pool, ref_msg.id, telegram_chat.id)
                     .await
@@ -739,7 +740,7 @@ async fn handle_update(
                     Ok(&[mirror_id, ..]) => {
                         let discord_channel = discord_chat.to_channel(cache_http).await?;
 
-                        ref_disc_message = discord_cache
+                        let mut ref_disc_message = discord_cache
                             .message(discord_channel, mirror_id)
                             .map(|msg| msg.clone());
                         if ref_disc_message.is_none() {
@@ -756,22 +757,35 @@ async fn handle_update(
                         log::error!("Database lookup failed: {e}");
                     }
                 }
-                let ref_text = if let Some(disc_message) = ref_disc_message {
-                    disc_message.content.replace("\n", "\n> ")
+                let ref_text = ref_msg
+                    .text()
+                    .zip(ref_msg.parse_entities())
+                    .or_else(|| ref_msg.caption().zip(ref_msg.parse_caption_entities()))
+                    .map(|(t, e)| format::telegram_to_discord_format(t, e))
+                    .unwrap_or_default();
+                let (ref_author, ref_text) = if ref_sender_telegram {
+                    let ref_text = ref_text.replace("\n", "\n> ");
+                    let ref_author = format::telegram_author_name(ref_msg);
+                    (ref_author, ref_text)
                 } else {
-                    ref_msg
-                        .text()
-                        .zip(ref_msg.parse_entities())
-                        .map(|(t, e)| format::telegram_to_discord_format(t, e))
-                        .unwrap_or_default()
-                        .replace("\n", "\n> ")
-                };
-                let ref_author = if let Some(author_id) = ref_author_id {
-                    let mention = author_id.mention();
-                    mentions = mentions.users(Some(author_id));
-                    mention.to_string()
-                } else {
-                    format::telegram_author_name(ref_msg)
+                    let mut lines = ref_text.lines();
+                    let first_line = lines.next().unwrap_or_else(|| {
+                        log::error!("message from bot has no lines");
+                        ""
+                    });
+                    let ref_text = lines.collect::<Vec<_>>().join("\n> ");
+                    let ref_author = if let Some(author_id) = ref_author_id {
+                        let mention = author_id.mention();
+                        mentions = mentions.users(Some(author_id));
+                        mention.to_string()
+                    } else {
+                        first_line
+                            .split("**")
+                            .nth(1)
+                            .unwrap_or("Unknown")
+                            .to_string()
+                    };
+                    (ref_author, ref_text)
                 };
                 let reply_str = if let Some(link) = ref_link {
                     format!("[replying to]({link})")
@@ -843,7 +857,7 @@ async fn handle_update(
                     if let Some(ref_msg) = msg.reply_to_message() {
                         let mut ref_author_id = None;
                         let mut ref_link = None;
-                        let mut ref_disc_message = None;
+                        let ref_sender_telegram = ref_msg.from().map(|f| f.id) != Some(me.id);
 
                         match db::get_discord_message_id(&db_pool, ref_msg.id, telegram_chat.id)
                             .await
@@ -852,7 +866,7 @@ async fn handle_update(
                             Ok(&[mirror_id, ..]) => {
                                 let discord_channel = discord_chat.to_channel(cache_http).await?;
 
-                                ref_disc_message = discord_cache
+                                let mut ref_disc_message = discord_cache
                                     .message(discord_channel, mirror_id)
                                     .map(|msg| msg.clone());
                                 if ref_disc_message.is_none() {
@@ -871,22 +885,35 @@ async fn handle_update(
                                 log::error!("Database lookup failed: {e}");
                             }
                         }
-                        let ref_text = if let Some(disc_message) = ref_disc_message {
-                            disc_message.content.replace("\n", "\n> ")
+                        let ref_text = ref_msg
+                            .text()
+                            .zip(ref_msg.parse_entities())
+                            .or_else(|| ref_msg.caption().zip(ref_msg.parse_caption_entities()))
+                            .map(|(t, e)| format::telegram_to_discord_format(t, e))
+                            .unwrap_or_default();
+                        let (ref_author, ref_text) = if ref_sender_telegram {
+                            let ref_text = ref_text.replace("\n", "\n> ");
+                            let ref_author = format::telegram_author_name(ref_msg);
+                            (ref_author, ref_text)
                         } else {
-                            ref_msg
-                                .text()
-                                .zip(ref_msg.parse_entities())
-                                .map(|(t, e)| format::telegram_to_discord_format(t, e))
-                                .unwrap_or_default()
-                                .replace("\n", "\n> ")
-                        };
-                        let ref_author = if let Some(author_id) = ref_author_id {
-                            let mention = author_id.mention();
-                            mentions = mentions.users(Some(author_id));
-                            mention.to_string()
-                        } else {
-                            format::telegram_author_name(ref_msg)
+                            let mut lines = ref_text.lines();
+                            let first_line = lines.next().unwrap_or_else(|| {
+                                log::error!("message from bot has no lines");
+                                ""
+                            });
+                            let ref_text = lines.collect::<Vec<_>>().join("\n> ");
+                            let ref_author = if let Some(author_id) = ref_author_id {
+                                let mention = author_id.mention();
+                                mentions = mentions.users(Some(author_id));
+                                mention.to_string()
+                            } else {
+                                first_line
+                                    .split("**")
+                                    .nth(1)
+                                    .unwrap_or("Unknown")
+                                    .to_string()
+                            };
+                            (ref_author, ref_text)
                         };
                         let reply_str = if let Some(link) = ref_link {
                             format!("[replying to]({link})")
