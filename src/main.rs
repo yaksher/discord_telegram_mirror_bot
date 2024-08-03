@@ -842,7 +842,6 @@ async fn handle_update(
                     .or_else(|| ref_msg.caption().zip(ref_msg.parse_caption_entities()))
                     .map(|(t, e)| format::telegram_to_discord_format(t, e))
                     .unwrap_or_default();
-                let ref_text_empty = ref_text.is_empty();
                 let (ref_author, ref_text) = if ref_sender_telegram {
                     let ref_text = ref_text.replace("\n", "\n> ");
                     let ref_author = format::telegram_author_name(ref_msg);
@@ -867,7 +866,7 @@ async fn handle_update(
                     };
                     (ref_author, ref_text)
                 };
-                let reply_str = if ref_text_empty {
+                let reply_str = if ref_text.is_empty() {
                     "replying to attachment from"
                 } else {
                     "replying to"
@@ -877,8 +876,8 @@ async fn handle_update(
                 } else {
                     reply_str.to_string()
                 };
-                let ref_text = if ref_text_empty {
-                    "".to_string()
+                let ref_text = if ref_text.is_empty() {
+                    ref_text
                 } else {
                     format!("\n> {ref_text}")
                 };
