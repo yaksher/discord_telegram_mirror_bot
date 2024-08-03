@@ -872,6 +872,9 @@ async fn handle_update(
                     "replying to".to_string()
                 };
                 content = format!("**{reply_str} {ref_author}**\n> {ref_text}\n{content}");
+            } else if let Some(forward) = msg.forward() {
+                let original_author = format::telegram_forwarded_from_name(&forward.from);
+                content = format!("**{author}** (forwarded from **{original_author}**)\n{content}");
             }
             let mut message = d::ExecuteWebhook::new()
                 .content(&content)

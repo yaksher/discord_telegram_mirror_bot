@@ -201,6 +201,18 @@ pub fn telegram_author_name(msg: &t::Message) -> String {
         .unwrap_or("Unknown".into())
 }
 
+pub fn telegram_forwarded_from_name(f: &t::ForwardedFrom) -> String {
+    match f {
+        t::ForwardedFrom::User(user) => user.full_name(),
+        t::ForwardedFrom::Chat(chat) => chat
+            .title()
+            .or_else(|| chat.username())
+            .unwrap_or("Unknown")
+            .to_string(),
+        t::ForwardedFrom::SenderName(name) => name.to_string(),
+    }
+}
+
 pub fn parse_telegram_reaction_message(
     text: &str,
 ) -> std::collections::HashMap<String, Vec<String>> {
