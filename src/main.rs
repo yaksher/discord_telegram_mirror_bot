@@ -842,6 +842,7 @@ async fn handle_update(
                     .or_else(|| ref_msg.caption().zip(ref_msg.parse_caption_entities()))
                     .map(|(t, e)| format::telegram_to_discord_format(t, e))
                     .unwrap_or_default();
+                let ref_text_empty = ref_text.is_empty();
                 let (ref_author, ref_text) = if ref_sender_telegram {
                     let ref_text = ref_text.replace("\n", "\n> ");
                     let ref_author = format::telegram_author_name(ref_msg);
@@ -866,12 +867,22 @@ async fn handle_update(
                     };
                     (ref_author, ref_text)
                 };
-                let reply_str = if let Some(link) = ref_link {
-                    format!("[replying to]({link})")
+                let reply_str = if ref_text_empty {
+                    "replying to attachment from"
                 } else {
-                    "replying to".to_string()
+                    "replying to"
                 };
-                content = format!("**{reply_str} {ref_author}**\n> {ref_text}\n{content}");
+                let reply_str = if let Some(link) = ref_link {
+                    format!("[{reply_str}]({link})")
+                } else {
+                    reply_str.to_string()
+                };
+                let ref_text = if ref_text_empty {
+                    "".to_string()
+                } else {
+                    format!("\n> {ref_text}")
+                };
+                content = format!("**{reply_str} {ref_author}**{ref_text}\n{content}");
             } else if let Some(forward) = msg.forward() {
                 let original_author = format::telegram_forwarded_from_name(&forward.from);
                 content = format!("**{author}** (forwarded from **{original_author}**)\n{content}");
