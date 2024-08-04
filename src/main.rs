@@ -73,7 +73,7 @@ macro_rules! discord_request {
     };
 }
 
-macro_rules! log_helper {
+macro_rules! edbg {
     ($($e:expr),*$(,)?) => {
         log::error!(concat!("{}:{}\n", $(concat!(stringify!($e), ": {:?}\n")),*), file!(), line!(), $($e),*)
     };
@@ -164,7 +164,7 @@ impl d::EventHandler for DiscordState {
                 s
             };
             (
-                telegram_request!(s.send_ref(), log_helper!(author, msg.content, content),).await,
+                telegram_request!(s.send_ref(), edbg!(author, msg.content, content),).await,
                 true,
             )
         } else {
@@ -179,7 +179,7 @@ impl d::EventHandler for DiscordState {
             };
 
             (
-                telegram_request!(s.send_ref(), log_helper!(author, msg.content, content),).await,
+                telegram_request!(s.send_ref(), edbg!(author, msg.content, content),).await,
                 false,
             )
         };
@@ -403,16 +403,14 @@ impl d::EventHandler for DiscordState {
                         .edit_message_text(telegram_chat, mirror_id, message_text)
                         .parse_mode(t::ParseMode::Html);
 
-                    telegram_request!(builder.send_ref(), log_helper!(author, content, text),)
-                        .await;
+                    telegram_request!(builder.send_ref(), edbg!(author, content, text),).await;
                 } else {
                     let builder = self
                         .telegram_bot
                         .edit_message_caption(telegram_chat, mirror_id)
                         .caption(message_text)
                         .parse_mode(t::ParseMode::Html);
-                    telegram_request!(builder.send_ref(), log_helper!(author, content, text),)
-                        .await;
+                    telegram_request!(builder.send_ref(), edbg!(author, content, text),).await;
                 }
             }
             // the edited message had no known counterpart so do nothing
@@ -901,7 +899,7 @@ async fn handle_update(
 
             let discord_result = discord_request!(
                 webhook.execute(discord_http.clone(), true, message.clone()),
-                log_helper!(author, msg.text().unwrap_or(""), content)
+                edbg!(author, msg.text().unwrap_or(""), content)
             )
             .await;
 
@@ -1021,7 +1019,7 @@ async fn handle_update(
 
                     discord_request!(
                         webhook.edit_message(cache_http, mirror_id, message.clone()),
-                        log_helper!(author, msg.text().unwrap_or(""), content)
+                        edbg!(author, msg.text().unwrap_or(""), content)
                     )
                     .await;
                 }
