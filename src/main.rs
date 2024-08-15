@@ -159,7 +159,10 @@ impl d::EventHandler for DiscordState {
                 .caption(text)
                 .parse_mode(t::ParseMode::Html);
             let s = if let Some(id) = reply_to_message_id {
-                s.reply_to_message_id(id)
+                s.reply_parameters(t::ReplyParameters {
+                    message_id: id,
+                    ..Default::default()
+                })
             } else {
                 s
             };
@@ -173,7 +176,10 @@ impl d::EventHandler for DiscordState {
                 .send_message(telegram_chat, text)
                 .parse_mode(t::ParseMode::Html);
             let s = if let Some(id) = reply_to_message_id {
-                builder.reply_to_message_id(id)
+                builder.reply_parameters(t::ReplyParameters {
+                    message_id: id,
+                    ..Default::default()
+                })
             } else {
                 builder
             };
@@ -499,7 +505,10 @@ impl d::EventHandler for DiscordState {
                     .telegram_bot
                     .send_message(telegram_chat, &text)
                     .parse_mode(t::ParseMode::Html)
-                    .reply_to_message_id(telegram_id))
+                    .reply_parameters(t::ReplyParameters {
+                        message_id: telegram_id,
+                        ..Default::default()
+                    }))
                 .await
                 {
                     if let Err(e) = db::insert_reaction_mapping(
@@ -603,7 +612,10 @@ async fn get_telegram_attachment_as_discord(bot: &t::Bot, msg: &t::Message) -> O
                     msg.chat.id,
                     "File too large. Files over 50 MB won't be forwarded"
                 )
-                .reply_to_message_id(msg.id)
+                .reply_parameters(t::ReplyParameters {
+                    message_id: msg.id,
+                    ..Default::default()
+                })
                 .clone())
             .await;
             return None;
@@ -795,7 +807,7 @@ async fn handle_update(
             let avatar_handle = {
                 let bot = bot.clone();
                 let avatar_cache = avatar_cache.clone();
-                let from = msg.from().cloned();
+                let from = msg.from.clone();
                 let discord_http = discord_http.clone();
                 tokio::spawn(async move {
                     match from {
@@ -808,7 +820,7 @@ async fn handle_update(
             if let Some(ref_msg) = msg.reply_to_message() {
                 let mut ref_author_id = None;
                 let mut ref_link = None;
-                let ref_sender_telegram = ref_msg.from().map(|f| f.id) != Some(me.id);
+                let ref_sender_telegram = ref_msg.from.as_ref().map(|f| f.id) != Some(me.id);
 
                 match db::get_discord_message_id(&db_pool, ref_msg.id, telegram_chat.id)
                     .await
@@ -880,9 +892,9 @@ async fn handle_update(
                     format!("\n> {ref_text}")
                 };
                 content = format!("**{reply_str} {ref_author}**{ref_text}\n{content}");
-            } else if let Some(forward) = msg.forward() {
-                let original_author = format::telegram_forwarded_from_name(&forward.from);
-                content = format!("**{author}** (forwarded from **{original_author}**)\n{content}");
+            } else if let Some(origin) = msg.forward_origin() {
+                let original_author = format::telegram_forwarded_from_name(origin);
+                content = format!("-# Forwarded from **{original_author}**\n{content}");
             }
             let mut message = d::ExecuteWebhook::new()
                 .content(&content)
@@ -947,7 +959,8 @@ async fn handle_update(
                     if let Some(ref_msg) = msg.reply_to_message() {
                         let mut ref_author_id = None;
                         let mut ref_link = None;
-                        let ref_sender_telegram = ref_msg.from().map(|f| f.id) != Some(me.id);
+                        let ref_sender_telegram =
+                            ref_msg.from.as_ref().map(|f| f.id) != Some(me.id);
 
                         match db::get_discord_message_id(&db_pool, ref_msg.id, telegram_chat.id)
                             .await

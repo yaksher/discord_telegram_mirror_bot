@@ -172,6 +172,9 @@ pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityR
             t::MessageEntityKind::CustomEmoji { custom_emoji_id } => {
                 let _ = custom_emoji_id;
             }
+            t::MessageEntityKind::Blockquote => {
+                // TODO: support this properly for multiline blockquotes
+            }
             t::MessageEntityKind::Mention
             | t::MessageEntityKind::Hashtag
             | t::MessageEntityKind::Cashtag
@@ -195,21 +198,30 @@ pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityR
 }
 
 pub fn telegram_author_name(msg: &t::Message) -> String {
-    msg.from()
+    msg.from
+        .as_ref()
         .map(|u| u.full_name())
-        .or(msg.sender_chat().and_then(|c| c.title().map(Into::into)))
+        .or(msg
+            .sender_chat
+            .as_ref()
+            .and_then(|c| c.title().map(Into::into)))
         .unwrap_or("Unknown".into())
 }
 
-pub fn telegram_forwarded_from_name(f: &t::ForwardedFrom) -> String {
+pub fn telegram_forwarded_from_name(f: &t::MessageOrigin) -> String {
     match f {
-        t::ForwardedFrom::User(user) => user.full_name(),
-        t::ForwardedFrom::Chat(chat) => chat
+        t::MessageOrigin::User { sender_user, .. } => sender_user.full_name(),
+        t::MessageOrigin::Chat {
+            sender_chat: chat, ..
+        }
+        | t::MessageOrigin::Channel { chat, .. } => chat
             .title()
             .or_else(|| chat.username())
             .unwrap_or("Unknown")
             .to_string(),
-        t::ForwardedFrom::SenderName(name) => name.to_string(),
+        t::MessageOrigin::HiddenUser {
+            sender_user_name, ..
+        } => sender_user_name.clone(),
     }
 }
 
