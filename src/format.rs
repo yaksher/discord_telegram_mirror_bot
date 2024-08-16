@@ -201,11 +201,26 @@ pub fn telegram_author_name(msg: &t::Message) -> String {
     msg.from
         .as_ref()
         .map(|u| u.full_name())
-        .or(msg
-            .sender_chat
-            .as_ref()
-            .and_then(|c| c.title().map(Into::into)))
-        .unwrap_or("Unknown".into())
+        .or_else(|| {
+            msg.sender_chat
+                .as_ref()
+                .and_then(|c| c.title().map(Into::into))
+        })
+        .unwrap_or("Unknown [this shouldn't be possible]".into())
+}
+
+pub fn telegram_reactor_name(reaction: &t::MessageReactionUpdated) -> String {
+    reaction
+        .user
+        .as_ref()
+        .map(|u| u.full_name())
+        .or_else(|| {
+            reaction
+                .actor_chat
+                .as_ref()
+                .and_then(|c| c.title().map(Into::into))
+        })
+        .unwrap_or("Internal Error".into())
 }
 
 pub fn telegram_forwarded_from_name(f: &t::MessageOrigin) -> String {
@@ -263,7 +278,9 @@ pub fn format_telegram_reaction_message(
         .join("\n")
 }
 
-pub fn parse_discord_reaction_message(text: &str) -> std::collections::HashMap<String, String> {
+pub fn parse_discord_reaction_message(
+    text: &str,
+) -> std::collections::HashMap<String, Vec<String>> {
     text.lines()
         .skip(1)
         .filter_map(|line| {
@@ -273,7 +290,7 @@ pub fn parse_discord_reaction_message(text: &str) -> std::collections::HashMap<S
                     parts[0]
                         .trim_matches(|c: char| c.is_whitespace() || c == '*' || c == '_')
                         .to_string(),
-                    parts[1].trim().to_string(),
+                    parts[1].split(',').map(|s| s.trim().to_string()).collect(),
                 ))
             } else {
                 None
@@ -283,14 +300,15 @@ pub fn parse_discord_reaction_message(text: &str) -> std::collections::HashMap<S
 }
 
 pub fn format_discord_reaction_message(
-    reactions: &std::collections::HashMap<String, String>,
+    reactions: &std::collections::HashMap<String, Vec<String>>,
 ) -> String {
     Some("**Reactions**".to_string())
         .into_iter()
         .chain(
             reactions
                 .iter()
-                .map(|(user, emoji)| format!("**{}**: {}", user, emoji)),
+                .filter(|(_, emojis)| !emojis.is_empty())
+                .map(|(user, emojis)| format!("**{}**: {}", user, emojis.join(", "))),
         )
         .collect::<Vec<_>>()
         .join("\n")

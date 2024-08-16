@@ -329,11 +329,11 @@ impl d::EventHandler for DiscordState {
             log::error!("Updates without an author id are currently unsupported.");
             return;
         }
-        if upd.webhook_id.is_none() {
-            log::error!("Updates without a webhook id are currently unsupported.");
+        if (&upd.author).as_ref().expect("author is checked").id == ctx.cache.current_user().id {
             return;
         }
-        if (&upd.author).as_ref().expect("author is checked").id == ctx.cache.current_user().id {
+        if upd.webhook_id.is_none() {
+            log::error!("Updates without a webhook id are currently unsupported.");
             return;
         }
         if upd.webhook_id.expect("webhook id is checked").is_some() {
@@ -496,7 +496,8 @@ impl d::EventHandler for DiscordState {
                     }
                 }
             }
-            _ => {
+            Err(e) => log::error!("Failed to get reaction message mapping: {}", e),
+            Ok(None) => {
                 // Reaction message doesn't exist, create a new one
                 let author = format::discord_reactor_name(&ctx, &reaction).await;
                 let text = format!("<b>Reactions</b>\n<b>{}</b>: {}", author, emoji);
@@ -1047,6 +1048,119 @@ async fn handle_update(
                     }
                 }
                 Err(e) => log::error!("Failed to get message mapping: {}", e),
+            }
+        }
+        t::UpdateKind::MessageReaction(reaction) => {
+            let telegram_id = reaction.message_id;
+            let discord_id =
+                match db::get_discord_message_id(&db_pool, telegram_id, telegram_chat.id)
+                    .await
+                    .as_deref()
+                {
+                    Ok(&[discord_id, ..]) => discord_id,
+                    Ok([]) => {
+                        log::info!("Got reaction for unknown message, {reaction:?}");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        log::error!("Failed to get reaction message mapping: {}", e);
+                        return Ok(());
+                    }
+                };
+            match db::get_discord_reaction_message_id(&db_pool, telegram_id, telegram_chat.id).await
+            {
+                Ok(Some((reaction_message_id, reactions))) => {
+                    let mut reactions = format::parse_discord_reaction_message(&reactions);
+                    let author = format::telegram_reactor_name(&reaction);
+                    let _ = reactions.insert(
+                        author,
+                        reaction
+                            .new_reaction
+                            .iter()
+                            .filter_map(t::ReactionType::emoji)
+                            .cloned()
+                            .collect(),
+                    );
+
+                    let new_text = format::format_discord_reaction_message(&reactions);
+                    if new_text == "**Reactions**" {
+                        if let Some(_) = discord_request!(
+                            discord_chat.delete_message(&*discord_http, reaction_message_id)
+                        )
+                        .await
+                        {
+                            if let Err(e) = db::remove_reaction_mapping_by_telegram(
+                                &db_pool,
+                                telegram_id,
+                                telegram_chat.id,
+                            )
+                            .await
+                            {
+                                log::error!("Failed to remove reaction message mapping: {}", e);
+                            }
+                        }
+                    } else {
+                        if let Some(_) = discord_request!(discord_chat.edit_message(
+                            &*discord_http,
+                            reaction_message_id,
+                            d::EditMessage::new().content(&new_text)
+                        ))
+                        .await
+                        {
+                            if let Err(e) = db::update_discord_reaction_mapping(
+                                &db_pool,
+                                telegram_id,
+                                telegram_chat.id,
+                                &new_text,
+                            )
+                            .await
+                            {
+                                log::error!("Failed to update reaction message mapping: {}", e);
+                            }
+                        }
+                    }
+                }
+                Ok(None)
+                    if reaction
+                        .new_reaction
+                        .iter()
+                        .any(|r| matches!(r, t::ReactionType::Emoji { .. })) =>
+                {
+                    let author = format::telegram_reactor_name(&reaction);
+                    let emojis = reaction
+                        .new_reaction
+                        .iter()
+                        .filter_map(t::ReactionType::emoji)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let content = format!("**Reactions**\n**{author}**: {emojis}");
+                    let reaction_msg = d::CreateMessage::new()
+                        .content(&content)
+                        .reference_message((discord_chat, discord_id))
+                        .allowed_mentions(d::CreateAllowedMentions::new().replied_user(false));
+
+                    if let Some(reaction_msg) = discord_request!(
+                        discord_chat.send_message(&*discord_http, reaction_msg.clone()),
+                        edbg!(author, emojis, content)
+                    )
+                    .await
+                    {
+                        if let Err(e) = db::insert_reaction_mapping(
+                            &db_pool,
+                            reaction_msg.id,
+                            telegram_id,
+                            telegram_chat.id,
+                            &content,
+                        )
+                        .await
+                        {
+                            log::error!("Failed to insert reaction mapping: {}", e);
+                        }
+                    }
+                }
+                Ok(None) => log::info!("Got reaction removal for unknown message, {reaction:?}"),
+                Err(e) => log::error!("Failed to get reaction message mapping: {}", e),
             }
         }
         _ => {}
