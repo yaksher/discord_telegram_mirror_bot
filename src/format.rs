@@ -278,6 +278,14 @@ pub fn format_telegram_reaction_message(
         .join("\n")
 }
 
+pub fn filter_telegram_reactions(reactions: &[t::ReactionType]) -> Vec<String> {
+    reactions
+        .iter()
+        .filter_map(t::ReactionType::emoji)
+        .map(|e| e.replace("❤", "❤️"))
+        .collect()
+}
+
 pub fn parse_discord_reaction_message(
     text: &str,
 ) -> std::collections::HashMap<String, Vec<String>> {

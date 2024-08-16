@@ -1074,12 +1074,7 @@ async fn handle_update(
                     let author = format::telegram_reactor_name(&reaction);
                     let _ = reactions.insert(
                         author,
-                        reaction
-                            .new_reaction
-                            .iter()
-                            .filter_map(t::ReactionType::emoji)
-                            .cloned()
-                            .collect(),
+                        format::filter_telegram_reactions(&reaction.new_reaction),
                     );
 
                     let new_text = format::format_discord_reaction_message(&reactions);
@@ -1127,13 +1122,8 @@ async fn handle_update(
                         .any(|r| matches!(r, t::ReactionType::Emoji { .. })) =>
                 {
                     let author = format::telegram_reactor_name(&reaction);
-                    let emojis = reaction
-                        .new_reaction
-                        .iter()
-                        .filter_map(t::ReactionType::emoji)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let emojis =
+                        format::filter_telegram_reactions(&reaction.new_reaction).join(", ");
                     let content = format!("**Reactions**\n**{author}**: {emojis}");
                     let reaction_msg = d::CreateMessage::new()
                         .content(&content)
