@@ -159,10 +159,7 @@ impl d::EventHandler for DiscordState {
                 .caption(text)
                 .parse_mode(t::ParseMode::Html);
             let s = if let Some(id) = reply_to_message_id {
-                s.reply_parameters(t::ReplyParameters {
-                    message_id: id,
-                    ..Default::default()
-                })
+                s.reply_parameters(t::ReplyParameters::new(id))
             } else {
                 s
             };
@@ -176,10 +173,7 @@ impl d::EventHandler for DiscordState {
                 .send_message(telegram_chat, text)
                 .parse_mode(t::ParseMode::Html);
             let s = if let Some(id) = reply_to_message_id {
-                builder.reply_parameters(t::ReplyParameters {
-                    message_id: id,
-                    ..Default::default()
-                })
+                builder.reply_parameters(t::ReplyParameters::new(id))
             } else {
                 builder
             };
@@ -506,10 +500,7 @@ impl d::EventHandler for DiscordState {
                     .telegram_bot
                     .send_message(telegram_chat, &text)
                     .parse_mode(t::ParseMode::Html)
-                    .reply_parameters(t::ReplyParameters {
-                        message_id: telegram_id,
-                        ..Default::default()
-                    }))
+                    .reply_parameters(t::ReplyParameters::new(telegram_id)))
                 .await
                 {
                     if let Err(e) = db::insert_reaction_mapping(
@@ -613,10 +604,7 @@ async fn get_telegram_attachment_as_discord(bot: &t::Bot, msg: &t::Message) -> O
                     msg.chat.id,
                     "File too large. Files over 50 MB won't be forwarded"
                 )
-                .reply_parameters(t::ReplyParameters {
-                    message_id: msg.id,
-                    ..Default::default()
-                })
+                .reply_parameters(t::ReplyParameters::new(msg.id))
                 .clone())
             .await;
             return None;
