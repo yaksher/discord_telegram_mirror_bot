@@ -449,8 +449,8 @@ impl d::EventHandler for DiscordState {
             log::info!("Got reaction {reaction:?} in unregistered discord channel");
             return;
         };
-        let d::ReactionType::Unicode(emoji) = &reaction.emoji else {
-            log::info!("Got reaction {reaction:?} with non-unicode emoji");
+        let Some(emoji) = format::discord_reaction_string(&reaction.emoji) else {
+            log::info!("Got reaction {reaction:?} with nameless emoji");
             return;
         };
         let discord_id = reaction.message_id;
@@ -473,7 +473,7 @@ impl d::EventHandler for DiscordState {
                 // Reaction message exists, update it
                 let mut reactions = format::parse_telegram_reaction_message(&reactions);
                 let author = format::discord_reactor_name(&ctx, &reaction).await;
-                reactions.entry(author).or_default().push(emoji.clone());
+                reactions.entry(author).or_default().push(emoji.to_string());
 
                 let new_text = format::format_telegram_reaction_message(&reactions);
 
@@ -524,8 +524,8 @@ impl d::EventHandler for DiscordState {
             log::info!("Got reaction {reaction:?} in unregistered discord channel");
             return;
         };
-        let d::ReactionType::Unicode(emoji) = &reaction.emoji else {
-            log::info!("Got reaction {reaction:?} with non-unicode emoji");
+        let Some(emoji) = format::discord_reaction_string(&reaction.emoji) else {
+            log::info!("Got reaction {reaction:?} with nameless emoji");
             return;
         };
         let discord_id = reaction.message_id;

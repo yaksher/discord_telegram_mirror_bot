@@ -223,6 +223,17 @@ pub fn telegram_reactor_name(reaction: &t::MessageReactionUpdated) -> String {
         .unwrap_or("Internal Error".into())
 }
 
+pub fn discord_reaction_string(reaction: &d::ReactionType) -> Option<&str> {
+    match reaction {
+        d::ReactionType::Unicode(emoji) => Some(emoji),
+        d::ReactionType::Custom { name, .. } => name.as_deref(),
+        _ => {
+            log::warn!("Unhandled reaction type: {:?}", reaction);
+            None
+        }
+    }
+}
+
 pub fn telegram_forwarded_from_name(f: &t::MessageOrigin) -> String {
     match f {
         t::MessageOrigin::User { sender_user, .. } => sender_user.full_name(),
@@ -281,8 +292,10 @@ pub fn format_telegram_reaction_message(
 pub fn filter_telegram_reactions(reactions: &[t::ReactionType]) -> Vec<String> {
     reactions
         .iter()
-        .filter_map(t::ReactionType::emoji)
-        .map(|e| e.replace("❤", "❤️"))
+        .map(|r| match r {
+            t::ReactionType::Emoji { emoji } => emoji.replace("❤", "❤️"),
+            t::ReactionType::CustomEmoji { custom_emoji_id } => custom_emoji_id.to_string(),
+        })
         .collect()
 }
 
