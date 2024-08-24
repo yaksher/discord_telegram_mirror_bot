@@ -826,7 +826,9 @@ async fn handle_update(
                         ref_link =
                             Some(mirror_id.link_ensured(cache_http, discord_chat, None).await);
                     }
-                    Ok([]) => {}
+                    Ok([]) => {
+                        log::info!("Replying to message {ref_msg:?} with no known counterpart");
+                    }
                     Err(e) => {
                         log::error!("Database lookup failed: {e}");
                     }
