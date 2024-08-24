@@ -581,22 +581,28 @@ impl d::EventHandler for DiscordState {
     }
 }
 
-#[rustfmt::skip]
-async fn get_telegram_attachment_as_discord(bot: &t::Bot, msg: &t::Message) -> Option<d::CreateAttachment> {
+async fn get_telegram_attachment_as_discord(
+    bot: &t::Bot,
+    msg: &t::Message,
+) -> Option<d::CreateAttachment> {
     let common = match &msg.kind {
         t::MessageKind::Common(common) => common,
         _ => return None,
     };
     let (file, file_name) = match common.media_kind.clone() {
-        t::MediaKind::Document(t::MediaDocument {document, ..}) => (document.file, document.file_name),
-        t::MediaKind::Photo(t::MediaPhoto {mut photo, ..}) => (photo.pop()?.file, None),
-        t::MediaKind::Video(t::MediaVideo {video, ..}) => (video.file, video.file_name),
-        t::MediaKind::Audio(t::MediaAudio {audio, ..}) => (audio.file, audio.file_name),
-        t::MediaKind::Animation(t::MediaAnimation {animation, ..}) => (animation.file, animation.file_name),
-        t::MediaKind::Sticker(t::MediaSticker {sticker, ..}) => (sticker.file, None),
+        t::MediaKind::Document(t::MediaDocument { document, .. }) => {
+            (document.file, document.file_name)
+        }
+        t::MediaKind::Photo(t::MediaPhoto { mut photo, .. }) => (photo.pop()?.file, None),
+        t::MediaKind::Video(t::MediaVideo { video, .. }) => (video.file, video.file_name),
+        t::MediaKind::Audio(t::MediaAudio { audio, .. }) => (audio.file, audio.file_name),
+        t::MediaKind::Animation(t::MediaAnimation { animation, .. }) => {
+            (animation.file, animation.file_name)
+        }
+        t::MediaKind::Sticker(t::MediaSticker { sticker, .. }) => (sticker.file, None),
         _ => return None,
     };
-    
+
     if file.size > 50 * 1024 * 1024 {
         telegram_request!(bot
             .send_message(
