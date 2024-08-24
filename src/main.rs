@@ -583,70 +583,66 @@ impl d::EventHandler for DiscordState {
 
 #[rustfmt::skip]
 async fn get_telegram_attachment_as_discord(bot: &t::Bot, msg: &t::Message) -> Option<d::CreateAttachment> {
-    if let (
-        Some(t::Document {file, file_name, .. }),_,_,_,_,_,_,
-    ) | (
-        _, Some([.., t::PhotoSize { file, .. }]),_,_,_,_, file_name
-    ) | (
-        _,_, Some(t::Video { file, file_name, .. }),_,_,_,_,
-    ) | (
-        _,_,_, Some(t::Audio { file, file_name, .. }),_,_,_,
-    ) | (
-        _,_,_,_, Some(t::Animation { file, file_name, .. }),_,_,
-    ) | (
-        _,_,_,_,_, Some(t::Sticker {file, set_name: file_name, .. }),_,
-    ) = (
-        msg.document(), msg.photo(), msg.video(), msg.audio(), msg.animation(), msg.sticker(), &None,
-    ) {
-        if file.size > 50 * 1024 * 1024 {
-            telegram_request!(bot
-                .send_message(
-                    msg.chat.id,
-                    "File too large. Files over 50 MB won't be forwarded"
-                )
-                .reply_parameters(t::ReplyParameters::new(msg.id))
-                .clone())
-            .await;
-            return None;
-        }
-        let file = match bot.get_file(file.id.as_str()).await {
-            Ok(file) => file,
-            Err(e) => {
-                log::error!("Failed to get file: {e:?}");
-                return None;
-            }
-        };
-        let path = file.path;
-        let Some(mut name) = file_name
-            .clone()
-            .or_else(|| path.split('/').last().map(String::from))
-        else {
-            log::error!("Failed to get file name");
-            return None;
-        };
-        if msg.has_media_spoiler() {
-            name = format!("SPOILER_{name}");
-        }
-        let mut bytes = Vec::new();
-        let mut retries = RETRIES;
-        let mut backoff = INITIAL_BACKOFF;
-        while let Err(e) = bot.download_file(&path, &mut bytes).await {
-            match e {
-                t::DownloadError::Network(_) if retries > 0 => {
-                    tokio::time::sleep(backoff).await;
-                    backoff *= 2;
-                    retries -= 1;
-                }
-                _ => {
-                    log::error!("Failed to download file: {e:?}");
-                    break;
-                }
-            }
-        }
-        Some(d::CreateAttachment::bytes(bytes, name))
-    } else {
-        None
+    let common = match &msg.kind {
+        t::MessageKind::Common(common) => common,
+        _ => return None,
+    };
+    let (file, file_name) = match common.media_kind.clone() {
+        t::MediaKind::Document(t::MediaDocument {document, ..}) => (document.file, document.file_name),
+        t::MediaKind::Photo(t::MediaPhoto {mut photo, ..}) => (photo.pop()?.file, None),
+        t::MediaKind::Video(t::MediaVideo {video, ..}) => (video.file, video.file_name),
+        t::MediaKind::Audio(t::MediaAudio {audio, ..}) => (audio.file, audio.file_name),
+        t::MediaKind::Animation(t::MediaAnimation {animation, ..}) => (animation.file, animation.file_name),
+        t::MediaKind::Sticker(t::MediaSticker {sticker, ..}) => (sticker.file, None),
+        _ => return None,
+    };
+    
+    if file.size > 50 * 1024 * 1024 {
+        telegram_request!(bot
+            .send_message(
+                msg.chat.id,
+                "File too large. Files over 50 MB won't be forwarded"
+            )
+            .reply_parameters(t::ReplyParameters::new(msg.id))
+            .clone())
+        .await;
+        return None;
     }
+    let file = match bot.get_file(file.id.as_str()).await {
+        Ok(file) => file,
+        Err(e) => {
+            log::error!("Failed to get file: {e:?}");
+            return None;
+        }
+    };
+    let path = file.path;
+    let Some(mut name) = file_name
+        .clone()
+        .or_else(|| path.split('/').last().map(String::from))
+    else {
+        log::error!("Failed to get file name");
+        return None;
+    };
+    if msg.has_media_spoiler() {
+        name = format!("SPOILER_{name}");
+    }
+    let mut bytes = Vec::new();
+    let mut retries = RETRIES;
+    let mut backoff = INITIAL_BACKOFF;
+    while let Err(e) = bot.download_file(&path, &mut bytes).await {
+        match e {
+            t::DownloadError::Network(_) if retries > 0 => {
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+                retries -= 1;
+            }
+            _ => {
+                log::error!("Failed to download file: {e:?}");
+                break;
+            }
+        }
+    }
+    Some(d::CreateAttachment::bytes(bytes, name))
 }
 
 #[derive(Clone, Debug)]
