@@ -661,7 +661,7 @@ async fn get_avatar_url(
     bot: &t::Bot,
     cache: &DashMap<t::UserId, AvatarCacheRecord>,
     user_id: t::UserId,
-    discord_http: Arc<d::Http>,
+    discord_http: &d::Http,
 ) -> Option<Arc<str>> {
     const CACHE_LIFETIME: Duration = Duration::from_secs(60 * 60);
     let record = cache.get(&user_id);
@@ -722,18 +722,22 @@ struct ReplyInfo {
 }
 
 async fn get_reply_info(
+    bot: &t::Bot,
     me: &t::Me,
     msg: &t::Message,
+    avatar_cache: &Arc<DashMap<t::UserId, AvatarCacheRecord>>,
     discord_http: &d::Http,
     discord_cache: &Arc<d::Cache>,
     discord_chat: d::ChannelId,
     telegram_chat: &t::Chat,
     db: &SqlitePool,
+    include_author_icon: bool,
 ) -> Option<ReplyInfo> {
     let cache_http = (discord_cache, discord_http);
     if let Some(ref_msg) = msg.reply_to_message() {
         let mut mentions = d::CreateAllowedMentions::new();
-        let mut ref_author_id = None;
+        let mut ref_user = None;
+        let mut ref_nick = None;
         let mut ref_link = None;
         let mut ref_image = None;
         let ref_sender_telegram = ref_msg.from.as_ref().map(|f| f.id) != Some(me.id);
@@ -754,7 +758,8 @@ async fn get_reply_info(
                 }
                 ref_link = Some(mirror_id.link_ensured(cache_http, discord_chat, None).await);
                 if let Some(msg) = ref_disc_message {
-                    ref_author_id = Some(msg.author.id);
+                    ref_nick = Some(format::discord_author_name(&cache_http, &msg).await);
+                    ref_user = Some(msg.author);
                     ref_image = msg.attachments.first().map(|a| a.url.clone()).or_else(|| {
                         msg.embeds
                             .first()
@@ -785,9 +790,9 @@ async fn get_reply_info(
                 ""
             });
             let ref_text = lines.collect::<Vec<_>>().join("\n> ");
-            let ref_author = if let Some(author_id) = ref_author_id {
-                let mention = author_id.mention();
-                mentions = mentions.users(Some(author_id));
+            let ref_author = if let Some(author) = &ref_user {
+                let mention = author.id.mention();
+                mentions = mentions.users(Some(author.id));
                 mention.to_string()
             } else {
                 first_line
@@ -803,7 +808,25 @@ async fn get_reply_info(
         } else {
             "replying to".to_string()
         };
-        let mut embed = d::CreateEmbed::new().description(ref_text);
+        let mut embed_author = d::CreateEmbedAuthor::new(ref_nick.as_ref().unwrap_or(&ref_author));
+        if include_author_icon {
+            if ref_sender_telegram {
+                if let Some(from) = &ref_msg.from {
+                    if let Some(url) =
+                        get_avatar_url(bot, &*avatar_cache, from.id, discord_http).await
+                    {
+                        embed_author = embed_author.icon_url(&*url);
+                    }
+                }
+            } else {
+                if let Some(url) = ref_user.as_ref().and_then(|u| u.avatar_url()) {
+                    embed_author = embed_author.icon_url(&*url);
+                }
+            }
+        }
+        let mut embed = d::CreateEmbed::new()
+            .description(ref_text)
+            .author(embed_author);
         if let Some(image) = ref_image {
             embed = embed.thumbnail(image);
         }
@@ -903,7 +926,7 @@ async fn handle_update(
                 let discord_http = discord_http.clone();
                 tokio::spawn(async move {
                     match from {
-                        Some(u) => get_avatar_url(&bot, &avatar_cache, u.id, discord_http).await,
+                        Some(u) => get_avatar_url(&bot, &avatar_cache, u.id, &*discord_http).await,
                         None => None,
                     }
                 })
@@ -916,8 +939,7 @@ async fn handle_update(
                 let mut original_author = d::CreateEmbedAuthor::new(&original_author);
                 if let t::MessageOrigin::User { sender_user, .. } = origin {
                     if let Some(url) =
-                        get_avatar_url(&bot, &avatar_cache, sender_user.id, discord_http.clone())
-                            .await
+                        get_avatar_url(&bot, &avatar_cache, sender_user.id, &*discord_http).await
                     {
                         original_author = original_author.icon_url(&*url);
                     }
@@ -935,13 +957,16 @@ async fn handle_update(
                 embed,
                 mentions,
             }) = get_reply_info(
+                &bot,
                 &me,
                 &msg,
+                &avatar_cache,
                 &discord_http,
                 &discord_cache,
                 discord_chat,
                 &telegram_chat,
                 &db,
+                true,
             )
             .await
             {
@@ -1017,13 +1042,16 @@ async fn handle_update(
                         mentions: new_mentions,
                         ..
                     }) = get_reply_info(
+                        &bot,
                         &me,
                         &msg,
+                        &avatar_cache,
                         &discord_http,
                         &discord_cache,
                         discord_chat,
                         &telegram_chat,
                         &db,
+                        false,
                     )
                     .await
                     {
