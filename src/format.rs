@@ -59,7 +59,7 @@ pub fn discord_to_telegram_format(content: &str) -> String {
 }
 
 pub async fn discord_author_name(ctx: &impl d::CacheHttp, msg: &d::Message) -> String {
-    msg.author_nick(ctx.clone())
+    msg.author_nick(ctx)
         .await
         .or_else(|| msg.author.global_name.clone())
         .unwrap_or_else(|| msg.author.name.clone())
