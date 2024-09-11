@@ -721,7 +721,7 @@ struct ReplyInfo {
     mentions: d::CreateAllowedMentions,
 }
 
-async fn get_reply_info(
+async fn reply_info(
     bot: &t::Bot,
     me: &t::Me,
     msg: &t::Message,
@@ -824,6 +824,39 @@ async fn get_reply_info(
                 }
             }
         }
+        fn preview(s: &str) -> String {
+            const MAX_LENGTH: usize = 200;
+            const MAX_LINES: usize = 5;
+            let mut changed = false;
+            let s = if s.chars().count() > MAX_LENGTH {
+                changed = true;
+                &s[..s
+                    .char_indices()
+                    .take(MAX_LENGTH)
+                    .filter(|&(_, c)| c.is_whitespace())
+                    .last()
+                    .unwrap()
+                    .0]
+            } else {
+                s
+            };
+            let s = if let Some(last_linebreak) = s
+                .char_indices()
+                .filter(|&(_, c)| c == '\n')
+                .nth(MAX_LINES - 1)
+            {
+                changed = true;
+                &s[..last_linebreak.0 + 1]
+            } else {
+                s
+            };
+            let mut s = s.to_string();
+            if changed {
+                s.push_str("...");
+            }
+            s
+        }
+        let ref_text = preview(&ref_text);
         let mut embed = d::CreateEmbed::new()
             .description(ref_text)
             .author(embed_author);
@@ -956,7 +989,7 @@ async fn handle_update(
                 content_suffix,
                 embed,
                 mentions,
-            }) = get_reply_info(
+            }) = reply_info(
                 &bot,
                 &me,
                 &msg,
@@ -1041,7 +1074,7 @@ async fn handle_update(
                         content_suffix,
                         mentions: new_mentions,
                         ..
-                    }) = get_reply_info(
+                    }) = reply_info(
                         &bot,
                         &me,
                         &msg,
