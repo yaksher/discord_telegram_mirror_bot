@@ -818,10 +818,8 @@ async fn reply_info(
                         embed_author = embed_author.icon_url(&*url);
                     }
                 }
-            } else {
-                if let Some(url) = ref_user.as_ref().and_then(|u| u.avatar_url()) {
-                    embed_author = embed_author.icon_url(&*url);
-                }
+            } else if let Some(url) = ref_user.as_ref().and_then(|u| u.avatar_url()) {
+                embed_author = embed_author.icon_url(&*url);
             }
         }
         fn preview(s: &str) -> String {
