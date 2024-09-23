@@ -234,23 +234,6 @@ pub fn discord_reaction_string(reaction: &d::ReactionType) -> Option<&str> {
     }
 }
 
-pub fn telegram_forwarded_from_name(f: &t::MessageOrigin) -> String {
-    match f {
-        t::MessageOrigin::User { sender_user, .. } => sender_user.full_name(),
-        t::MessageOrigin::Chat {
-            sender_chat: chat, ..
-        }
-        | t::MessageOrigin::Channel { chat, .. } => chat
-            .title()
-            .or_else(|| chat.username())
-            .unwrap_or("Unknown")
-            .to_string(),
-        t::MessageOrigin::HiddenUser {
-            sender_user_name, ..
-        } => sender_user_name.clone(),
-    }
-}
-
 pub fn parse_telegram_reaction_message(
     text: &str,
 ) -> std::collections::HashMap<String, Vec<String>> {

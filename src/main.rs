@@ -657,7 +657,7 @@ struct AvatarCacheRecord {
     last_updated: Instant,
 }
 
-async fn get_avatar_url(
+async fn telegram_avatar_url_by_id(
     bot: &t::Bot,
     cache: &DashMap<t::UserId, AvatarCacheRecord>,
     user_id: t::UserId,
@@ -713,6 +713,31 @@ async fn get_avatar_url(
     };
     cache.insert(user_id, record);
     Some(url)
+}
+
+async fn discord_avatar_url_by_display_name(
+    cache_http: &impl d::CacheHttp,
+    channel: d::ChannelId,
+    display_name: &str,
+) -> Option<String> {
+    let channel = discord_request!(channel.to_channel(cache_http)).await?;
+    let channel = channel.guild()?;
+    let members = channel.members(cache_http.cache()?).ok()?;
+    let member = members
+        .iter()
+        .find(|m| {
+            m.nick
+                .as_deref()
+                .or_else(|| m.user.global_name.as_deref())
+                .unwrap_or(&m.user.name)
+                == display_name
+        })
+        .or_else(|| {
+            members
+                .iter()
+                .find(|m| m.user.global_name.as_deref().unwrap_or(&m.user.name) == display_name)
+        })?;
+    member.user.avatar_url()
 }
 
 struct ReplyInfo {
@@ -813,7 +838,7 @@ async fn reply_info(
             if ref_sender_telegram {
                 if let Some(from) = &ref_msg.from {
                     if let Some(url) =
-                        get_avatar_url(bot, &*avatar_cache, from.id, discord_http).await
+                        telegram_avatar_url_by_id(bot, &*avatar_cache, from.id, discord_http).await
                     {
                         embed_author = embed_author.icon_url(&*url);
                     }
@@ -957,7 +982,10 @@ async fn handle_update(
                 let discord_http = discord_http.clone();
                 tokio::spawn(async move {
                     match from {
-                        Some(u) => get_avatar_url(&bot, &avatar_cache, u.id, &*discord_http).await,
+                        Some(u) => {
+                            telegram_avatar_url_by_id(&bot, &avatar_cache, u.id, &*discord_http)
+                                .await
+                        }
                         None => None,
                     }
                 })
@@ -966,19 +994,59 @@ async fn handle_update(
             let mut embed = None;
 
             if let Some(origin) = msg.forward_origin() {
-                let original_author = format::telegram_forwarded_from_name(origin);
+                let mut embed_content = &*content;
+                let original_author = match origin {
+                    t::MessageOrigin::User { sender_user, .. } => sender_user.full_name(),
+                    t::MessageOrigin::Chat {
+                        sender_chat: chat, ..
+                    }
+                    | t::MessageOrigin::Channel { chat, .. } => chat
+                        .title()
+                        .or_else(|| chat.username())
+                        .unwrap_or("Unknown")
+                        .to_string(),
+                    t::MessageOrigin::HiddenUser {
+                        sender_user_name, ..
+                    } => sender_user_name.clone(),
+                };
                 let mut original_author = d::CreateEmbedAuthor::new(&original_author);
-                if let t::MessageOrigin::User { sender_user, .. } = origin {
-                    if let Some(url) =
-                        get_avatar_url(&bot, &avatar_cache, sender_user.id, &*discord_http).await
-                    {
-                        original_author = original_author.icon_url(&*url);
+                'set_author: {
+                    if let t::MessageOrigin::User { sender_user, .. } = origin {
+                        if sender_user.id == me.id && !content.starts_with("**Reactions**\n") {
+                            let name = content
+                                .lines()
+                                .next()
+                                .and_then(|s| s.strip_prefix("**"))
+                                .and_then(|s| s.strip_suffix("**"))
+                                .unwrap_or("Unknown [this shouldn't be possible]");
+                            original_author = original_author.name(name);
+                            embed_content = embed_content
+                                .split_once('\n')
+                                .map_or(embed_content, |(_, rest)| rest);
+                            if let Some(url) =
+                                discord_avatar_url_by_display_name(&cache_http, discord_chat, name)
+                                    .await
+                            {
+                                original_author = original_author.icon_url(&*url);
+                                break 'set_author;
+                            }
+                        }
+                        if let Some(url) = telegram_avatar_url_by_id(
+                            &bot,
+                            &avatar_cache,
+                            sender_user.id,
+                            &*discord_http,
+                        )
+                        .await
+                        {
+                            original_author = original_author.icon_url(&*url);
+                        }
                     }
                 }
                 embed = Some(
                     d::CreateEmbed::new()
                         .author(original_author)
-                        .description(&content),
+                        .description(embed_content),
                 );
                 content = "-# Forwarded message".to_string();
             }
