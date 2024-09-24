@@ -38,6 +38,7 @@ mod discord {
             event::MessageUpdateEvent,
             gateway::Ready,
             id::{ChannelId, GuildId, MessageId, UserId},
+            user::User,
             webhook::{Webhook, WebhookChannel, WebhookGuild, WebhookType},
         },
         prelude::*,
@@ -82,14 +83,14 @@ macro_rules! edbg {
 }
 
 impl DiscordState {
-    async fn user_bot(&self, user_id: d::UserId) -> Result<t::Bot, t::Bot> {
-        if let Some(bot) = self.user_bots.get(&user_id) {
+    async fn user_bot(&self, ctx: &d::Context, user: &d::User) -> Result<t::Bot, t::Bot> {
+        if let Some(bot) = self.user_bots.get(&user.id) {
             return Ok(bot.clone());
         }
-        match db::get_user_bot(&self.db, user_id).await {
+        match db::get_user_bot(&self.db, user.id).await {
             Ok(Some(Some(bot_token))) => {
                 let bot = t::Bot::new(bot_token);
-                self.user_bots.insert(user_id, bot.clone());
+                self.user_bots.insert(user.id, bot.clone());
                 Ok(bot)
             }
             Ok(Some(None)) => {
@@ -99,7 +100,54 @@ impl DiscordState {
             Ok(None) => {
                 // prompt the user to opt in or out of having a mirror account
                 // and create the bot if they opt in
-                Err(self.main_bot.clone())
+                let name = manager::user_id_bot_name(user.id);
+                let about = manager::ABOUT;
+                let explanation = format!(
+                    r#"
+Telecord is about to create a Telegram bot account to mirror your messages.
+
+The bot's telegram username is `@{name}`. The tag is the low 32 bits of the murmur64 hash of your discord user id.
+
+The bot's telegram display name is your current discord global nickname, or your discord username if you don't have a global nickname.
+
+The bot's telegram display photo is your current discord avatar, or a generic default avatar if you don't have one.
+
+The bot's display name and photo may or may not be updated to whatever is current whenever you send a message in a server with Telecord but will not otherwise be updated.
+
+The bot's description reads "{about}"
+
+If the bot is DM'd, it will automatically respond with the description above (if online) and otherwise ignore the message.
+
+If you want bot's display information updated or the bot deleted, please let the admin know."#
+                );
+                let channel = match user.create_dm_channel(&ctx).await {
+                    Ok(channel) => channel,
+                    Err(e) => {
+                        log::error!("Failed to create DM channel: {}", e);
+                        return Err(self.main_bot.clone());
+                    }
+                };
+                let _ = discord_request!(channel.say(ctx, &explanation))
+                    .await
+                    .ok_or_else(|| self.main_bot.clone())?;
+                let token = match manager::make_bot(user).await {
+                    Ok(token) => token,
+                    Err(e) => {
+                        log::error!("Failed to make user bot: {}", e);
+                        let _ = discord_request!(channel.say(ctx, "Telecord failed to create the bot, so you can disregard the previous message.")).await;
+                        return Err(self.main_bot.clone());
+                    }
+                };
+                match db::insert_user_bot(&self.db, user.id, &token).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        log::error!("Failed to insert user bot: {}", e);
+                        return Err(self.main_bot.clone());
+                    }
+                }
+                let bot = t::Bot::new(token);
+                self.user_bots.insert(user.id, bot.clone());
+                Ok(bot)
             }
             Err(e) => {
                 log::error!("Failed to get user bot: {}", e);
@@ -134,7 +182,7 @@ impl d::EventHandler for DiscordState {
         let content = format::discord_to_telegram_format(&content);
         let author = format::discord_author_name(&ctx, &msg).await;
 
-        let (bot, include_name) = match self.user_bot(msg.author.id).await {
+        let (bot, include_name) = match self.user_bot(&ctx, &msg.author).await {
             Ok(bot) => (bot, false),
             Err(bot) => (bot, true),
         };
@@ -374,7 +422,7 @@ impl d::EventHandler for DiscordState {
         if upd.content.is_none() {
             return;
         }
-        let (bot, include_name) = match self.user_bot(upd_author.id).await {
+        let (bot, include_name) = match self.user_bot(&ctx, &upd_author).await {
             Ok(bot) => (bot, false),
             Err(bot) => (bot, true),
         };

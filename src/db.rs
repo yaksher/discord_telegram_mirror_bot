@@ -342,11 +342,7 @@ pub fn get_discord_channel_id(
         .map(|v| v.clone())
 }
 
-pub async fn insert_user_bot(
-    pool: &SqlitePool,
-    user_id: d::UserId,
-    bot_token: String,
-) -> Result<()> {
+pub async fn insert_user_bot(pool: &SqlitePool, user_id: d::UserId, bot_token: &str) -> Result<()> {
     sqlx::query("INSERT INTO user_bots (user_id, bot_token) VALUES (?, ?)")
         .bind(i64::from(user_id))
         .bind(bot_token)
