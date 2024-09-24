@@ -49,6 +49,17 @@ pub async fn init_db() -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS user_bots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id BIGINT NOT NULL,
+            bot_token TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
     load_chat_mappings()?;
 
     Ok(pool)
@@ -329,4 +340,27 @@ pub fn get_discord_channel_id(
     TELEGRAM_TO_DISCORD_CACHE
         .get(&telegram_chat_id)
         .map(|v| v.clone())
+}
+
+pub async fn insert_user_bot(
+    pool: &SqlitePool,
+    user_id: d::UserId,
+    bot_token: String,
+) -> Result<()> {
+    sqlx::query("INSERT INTO user_bots (user_id, bot_token) VALUES (?, ?)")
+        .bind(i64::from(user_id))
+        .bind(bot_token)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+pub async fn get_user_bot(pool: &SqlitePool, user_id: d::UserId) -> Result<Option<Option<String>>> {
+    let result = sqlx::query("SELECT bot_token FROM user_bots WHERE user_id = ?")
+        .bind(i64::from(user_id))
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(result.map(|row| row.get(0)))
 }

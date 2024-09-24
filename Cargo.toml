@@ -20,7 +20,7 @@ futures = "0.3.30"
 dashmap = "6.0.1"
 toml = "0.8.15"
 base64 = "0.22.1"
-
+grammers-client = { git = "https://github.com/Lonami/grammers" }
 
 
 [dependencies.serenity]

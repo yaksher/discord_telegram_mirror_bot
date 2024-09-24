@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 mod db;
 mod format;
+mod manager;
 
 use dashmap::DashMap;
 use sqlx::SqlitePool;
@@ -36,7 +37,7 @@ mod discord {
             channel::{Message, Reaction, ReactionType},
             event::MessageUpdateEvent,
             gateway::Ready,
-            id::{ChannelId, GuildId, MessageId},
+            id::{ChannelId, GuildId, MessageId, UserId},
             webhook::{Webhook, WebhookChannel, WebhookGuild, WebhookType},
         },
         prelude::*,
@@ -52,7 +53,8 @@ const DISCORD_TOKEN_ENV: &str = "DISCORD_TOKEN";
 const DISCORD_IMAGE_CHANNEL: d::ChannelId = d::ChannelId::new(1267352463158153216);
 
 struct DiscordState {
-    telegram_bot: t::Bot,
+    main_bot: t::Bot,
+    user_bots: DashMap<d::UserId, t::Bot>,
     db: SqlitePool,
 }
 
@@ -77,6 +79,34 @@ macro_rules! edbg {
     ($($e:expr),*$(,)?) => {
         log::error!(concat!("{}:{}\n", $(concat!(stringify!($e), ": {:?}\n")),*), file!(), line!(), $($e),*)
     };
+}
+
+impl DiscordState {
+    async fn user_bot(&self, user_id: d::UserId) -> Result<t::Bot, t::Bot> {
+        if let Some(bot) = self.user_bots.get(&user_id) {
+            return Ok(bot.clone());
+        }
+        match db::get_user_bot(&self.db, user_id).await {
+            Ok(Some(Some(bot_token))) => {
+                let bot = t::Bot::new(bot_token);
+                self.user_bots.insert(user_id, bot.clone());
+                Ok(bot)
+            }
+            Ok(Some(None)) => {
+                // user has opted out of having a mirror account
+                Err(self.main_bot.clone())
+            }
+            Ok(None) => {
+                // prompt the user to opt in or out of having a mirror account
+                // and create the bot if they opt in
+                Err(self.main_bot.clone())
+            }
+            Err(e) => {
+                log::error!("Failed to get user bot: {}", e);
+                Err(self.main_bot.clone())
+            }
+        }
+    }
 }
 
 #[d::async_trait]
@@ -104,7 +134,16 @@ impl d::EventHandler for DiscordState {
         let content = format::discord_to_telegram_format(&content);
         let author = format::discord_author_name(&ctx, &msg).await;
 
-        let mut text = format!("<b>{author}</b>\n{content}");
+        let (bot, include_name) = match self.user_bot(msg.author.id).await {
+            Ok(bot) => (bot, false),
+            Err(bot) => (bot, true),
+        };
+
+        let mut text = if include_name {
+            format!("<b>{author}</b>\n{content}")
+        } else {
+            content.clone()
+        };
 
         let mut reply_to_message_id = None;
 
@@ -152,8 +191,7 @@ impl d::EventHandler for DiscordState {
             };
             let f = t::InputFile::url(url.clone())
                 .file_name(a.filename.trim_start_matches("SPOILER_").to_string());
-            let s = self
-                .telegram_bot
+            let s = bot
                 .send_photo(telegram_chat, f)
                 .has_spoiler(a.filename.starts_with("SPOILER_"))
                 .caption(text)
@@ -168,8 +206,7 @@ impl d::EventHandler for DiscordState {
                 true,
             )
         } else {
-            let builder = self
-                .telegram_bot
+            let builder = bot
                 .send_message(telegram_chat, text)
                 .parse_mode(t::ParseMode::Html);
             let s = if let Some(id) = reply_to_message_id {
@@ -203,7 +240,7 @@ impl d::EventHandler for DiscordState {
                 .is_some_and(|t| t.starts_with("image/"))
         }) && msg.attachments.len() > 1
         {
-            let builder = self.telegram_bot.send_media_group(
+            let builder = bot.send_media_group(
                 telegram_chat,
                 msg.attachments
                     .iter()
@@ -261,7 +298,7 @@ impl d::EventHandler for DiscordState {
                             let f = t::InputFile::url(url.clone())
                                 .file_name(a.filename.trim_start_matches("SPOILER_").to_string());
                             let s = self
-                                .telegram_bot
+                                .main_bot
                                 .send_photo(telegram_chat, f)
                                 .has_spoiler(a.filename.starts_with("SPOILER_"));
                             telegram_msg = telegram_request!(s.send_ref()).await;
@@ -270,14 +307,14 @@ impl d::EventHandler for DiscordState {
                             let f = t::InputFile::url(url.clone())
                                 .file_name(a.filename.trim_start_matches("SPOILER_").to_string());
                             let s = self
-                                .telegram_bot
+                                .main_bot
                                 .send_video(telegram_chat, f)
                                 .has_spoiler(a.filename.starts_with("SPOILER_"));
                             telegram_msg = telegram_request!(s.send_ref()).await;
                             true
                         } else if kind.starts_with("audio/") {
                             telegram_msg = telegram_request!(self
-                                .telegram_bot
+                                .main_bot
                                 .send_audio(telegram_chat, t::InputFile::url(url.clone())))
                             .await;
                             true
@@ -289,7 +326,7 @@ impl d::EventHandler for DiscordState {
                     };
                     if !matched {
                         telegram_msg = telegram_request!(self
-                            .telegram_bot
+                            .main_bot
                             .send_document(telegram_chat, t::InputFile::url(url.clone())))
                         .await;
                     }
@@ -326,6 +363,7 @@ impl d::EventHandler for DiscordState {
         if (&upd.author).as_ref().expect("author is checked").id == ctx.cache.current_user().id {
             return;
         }
+        let upd_author = upd.author.as_ref().expect("author is checked").clone();
         if upd.webhook_id.is_none() {
             log::error!("Updates without a webhook id are currently unsupported.");
             return;
@@ -336,6 +374,10 @@ impl d::EventHandler for DiscordState {
         if upd.content.is_none() {
             return;
         }
+        let (bot, include_name) = match self.user_bot(upd_author.id).await {
+            Ok(bot) => (bot, false),
+            Err(bot) => (bot, true),
+        };
         let telegram_chat = match db::get_telegram_chat_id(upd.channel_id.clone()) {
             Some(chat_id) => chat_id,
             None => {
@@ -355,21 +397,24 @@ impl d::EventHandler for DiscordState {
                     &[],
                 );
                 let text = format::discord_to_telegram_format(&content);
+                let mut message_text = if include_name {
+                    let mut msg_with_author =
+                        ctx.cache.message(upd.channel_id, upd.id).map(|m| m.clone());
 
-                let mut msg_with_author =
-                    ctx.cache.message(upd.channel_id, upd.id).map(|m| m.clone());
+                    if msg_with_author.is_none() {
+                        msg_with_author =
+                            discord_request(|| ctx.http.get_message(upd.channel_id, upd.id), || ())
+                                .await;
+                    }
 
-                if msg_with_author.is_none() {
-                    msg_with_author =
-                        discord_request(|| ctx.http.get_message(upd.channel_id, upd.id), || ())
-                            .await;
-                }
-
-                let author = match msg_with_author {
-                    Some(msg) => format::discord_author_name(&ctx, &msg).await,
-                    None => "Unknown".into(),
+                    let author = match msg_with_author {
+                        Some(msg) => format::discord_author_name(&ctx, &msg).await,
+                        None => "Unknown".into(),
+                    };
+                    format!("<b>{author}</b>\n{text}")
+                } else {
+                    text.clone()
                 };
-                let mut message_text = format!("<b>{author}</b>\n{text}");
 
                 if let Some(ref_msg_id) = upd
                     .referenced_message
@@ -398,19 +443,17 @@ impl d::EventHandler for DiscordState {
                     }
                 }
                 if !has_caption {
-                    let builder = self
-                        .telegram_bot
+                    let builder = bot
                         .edit_message_text(telegram_chat, mirror_id, message_text)
                         .parse_mode(t::ParseMode::Html);
 
-                    telegram_request!(builder.send_ref(), edbg!(author, content, text),).await;
+                    telegram_request!(builder.send_ref(), edbg!(upd_author, content, text),).await;
                 } else {
-                    let builder = self
-                        .telegram_bot
+                    let builder = bot
                         .edit_message_caption(telegram_chat, mirror_id)
                         .caption(message_text)
                         .parse_mode(t::ParseMode::Html);
-                    telegram_request!(builder.send_ref(), edbg!(author, content, text),).await;
+                    telegram_request!(builder.send_ref(), edbg!(upd_author, content, text),).await;
                 }
             }
             // the edited message had no known counterpart so do nothing
@@ -436,7 +479,7 @@ impl d::EventHandler for DiscordState {
         match db::delete_by_discord(&self.db, msg_id).await {
             Ok(mirror_ids) => {
                 for telegram_id in mirror_ids {
-                    telegram_request!(self.telegram_bot.delete_message(telegram_chat, telegram_id))
+                    telegram_request!(self.main_bot.delete_message(telegram_chat, telegram_id))
                         .await;
                 }
             }
@@ -478,7 +521,7 @@ impl d::EventHandler for DiscordState {
                 let new_text = format::format_telegram_reaction_message(&reactions);
 
                 if let Some(_) = telegram_request!(self
-                    .telegram_bot
+                    .main_bot
                     .edit_message_text(telegram_chat, reaction_message_id, &new_text)
                     .parse_mode(t::ParseMode::Html))
                 .await
@@ -497,7 +540,7 @@ impl d::EventHandler for DiscordState {
                 let text = format!("<b>Reactions</b>\n<b>{}</b>: {}", author, emoji);
 
                 if let Some(telegram_msg) = telegram_request!(self
-                    .telegram_bot
+                    .main_bot
                     .send_message(telegram_chat, &text)
                     .parse_mode(t::ParseMode::Html)
                     .reply_parameters(t::ReplyParameters::new(telegram_id)))
@@ -536,10 +579,9 @@ impl d::EventHandler for DiscordState {
                 reactions.entry(author).or_default().retain(|e| e != emoji);
                 let new_text = format::format_telegram_reaction_message(&reactions);
                 if new_text == "<b>Reactions</b>" {
-                    if let Some(_) = telegram_request!(self
-                        .telegram_bot
-                        .delete_message(telegram_chat, telegram_id))
-                    .await
+                    if let Some(_) =
+                        telegram_request!(self.main_bot.delete_message(telegram_chat, telegram_id))
+                            .await
                     {
                         if let Err(e) =
                             db::remove_reaction_mapping_by_discord(&self.db, discord_id).await
@@ -549,7 +591,7 @@ impl d::EventHandler for DiscordState {
                     }
                 } else {
                     if let Some(_) = telegram_request!(self
-                        .telegram_bot
+                        .main_bot
                         .edit_message_text(telegram_chat, telegram_id, &new_text)
                         .parse_mode(t::ParseMode::Html))
                     .await
@@ -1382,7 +1424,8 @@ async fn main() {
     // by Discord for bot users.
     let mut discord_client = Client::builder(&discord_token, intents)
         .event_handler(DiscordState {
-            telegram_bot: telegram_bot.clone(),
+            main_bot: telegram_bot.clone(),
+            user_bots: DashMap::new(),
             db: db_pool.clone(),
         })
         .await
