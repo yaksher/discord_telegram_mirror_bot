@@ -326,11 +326,7 @@ impl d::EventHandler for DiscordState {
         if (&upd.author).as_ref().expect("author is checked").id == ctx.cache.current_user().id {
             return;
         }
-        if upd.webhook_id.is_none() {
-            log::error!("Updates without a webhook id are currently unsupported.");
-            return;
-        }
-        if upd.webhook_id.expect("webhook id is checked").is_some() {
+        if upd.webhook_id.is_some_and(|id| id.is_some()) {
             return;
         }
         if upd.content.is_none() {
