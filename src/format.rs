@@ -87,84 +87,45 @@ pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityR
     use std::collections::BTreeMap;
     let mut inserts: BTreeMap<usize, String> = BTreeMap::new();
     let mut modifiers: BTreeMap<usize, fn(&str) -> String> = BTreeMap::new();
+    let mut insert = |entity: &t::MessageEntityRef, pre: String, post: String| {
+        inserts
+            .entry(entity.start())
+            .and_modify(|s| s.push_str(&pre))
+            .or_insert(pre);
+        inserts
+            .entry(entity.end())
+            .and_modify(|s| *s = format!("{post}{s}"))
+            .or_insert(post);
+    };
     for entity in entities {
         match entity.kind() {
             t::MessageEntityKind::Bold => {
-                inserts
-                    .entry(entity.start())
-                    .and_modify(|s| s.push_str("**"))
-                    .or_insert("**".into());
-                inserts
-                    .entry(entity.end())
-                    .and_modify(|s| *s = format!("**{s}"))
-                    .or_insert("**".into());
+                insert(&entity, "**".to_string(), "**".to_string());
             }
             t::MessageEntityKind::Italic => {
-                inserts
-                    .entry(entity.start())
-                    .and_modify(|s| s.push_str("_"))
-                    .or_insert("_".into());
-                inserts
-                    .entry(entity.end())
-                    .and_modify(|s| *s = format!("_{s}"))
-                    .or_insert("_".into());
+                insert(&entity, "_".to_string(), "_".to_string());
             }
             t::MessageEntityKind::Underline => {
-                inserts
-                    .entry(entity.start())
-                    .and_modify(|s| s.push_str("__"))
-                    .or_insert("__".into());
-                inserts
-                    .entry(entity.end())
-                    .and_modify(|s| *s = format!("__{s}"))
-                    .or_insert("__".into());
+                insert(&entity, "__".to_string(), "__".to_string());
             }
             t::MessageEntityKind::Strikethrough => {
-                inserts
-                    .entry(entity.start())
-                    .and_modify(|s| s.push_str("~~"))
-                    .or_insert("~~".into());
-                inserts
-                    .entry(entity.end())
-                    .and_modify(|s| *s = format!("~~{s}"))
-                    .or_insert("~~".into());
+                insert(&entity, "~~".to_string(), "~~".to_string());
             }
             t::MessageEntityKind::Spoiler => {
-                inserts
-                    .entry(entity.start())
-                    .and_modify(|s| s.push_str("||"))
-                    .or_insert("||".into());
-                inserts
-                    .entry(entity.end())
-                    .and_modify(|s| *s = format!("||{s}"))
-                    .or_insert("||".into());
+                insert(&entity, "||".to_string(), "||".to_string());
             }
             t::MessageEntityKind::Code => {
-                inserts
-                    .entry(entity.start())
-                    .and_modify(|s| s.push_str("`"))
-                    .or_insert("`".into());
-                inserts
-                    .entry(entity.end())
-                    .and_modify(|s| *s = format!("`{s}"))
-                    .or_insert("`".into());
+                insert(&entity, "`".to_string(), "`".to_string());
             }
             t::MessageEntityKind::Pre { language } => {
-                inserts.insert(
-                    entity.start(),
+                insert(
+                    &entity,
                     format!("```{}", language.as_deref().unwrap_or("")),
+                    "```".to_string(),
                 );
-                inserts.insert(entity.end(), "```".to_string());
             }
             t::MessageEntityKind::TextLink { url } => {
-                inserts
-                    .entry(entity.start())
-                    .and_modify(|s| s.push_str("["))
-                    .or_insert("[".into());
-                inserts
-                    .entry(entity.end())
-                    .and_modify(|s| *s = format!("{s}]({url})"))
-                    .or_insert(format!("]({url})",));
+                insert(&entity, "[".to_string(), format!("]({url})",));
             }
             t::MessageEntityKind::TextMention { user } => {
                 // Handle TextMention
@@ -174,11 +135,7 @@ pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityR
                 let _ = custom_emoji_id;
             }
             t::MessageEntityKind::Blockquote => {
-                inserts
-                    .entry(entity.start())
-                    .and_modify(|s| s.push_str("> "))
-                    .or_insert("> ".into());
-                inserts.entry(entity.end()).or_insert("".into());
+                insert(&entity, "> ".to_string(), "".to_string());
                 modifiers.insert(entity.start(), |s| s.replace("\n", "\n> "));
             }
             t::MessageEntityKind::Mention
