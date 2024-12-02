@@ -86,6 +86,7 @@ pub async fn discord_reactor_name(ctx: &d::Context, reaction: &d::Reaction) -> S
 pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityRef>) -> String {
     use std::collections::BTreeMap;
     let mut inserts: BTreeMap<usize, String> = BTreeMap::new();
+    let mut modifiers: BTreeMap<usize, fn(&str) -> String> = BTreeMap::new();
     for entity in entities {
         match entity.kind() {
             t::MessageEntityKind::Bold => {
@@ -173,7 +174,12 @@ pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityR
                 let _ = custom_emoji_id;
             }
             t::MessageEntityKind::Blockquote => {
-                // TODO: support this properly for multiline blockquotes
+                inserts
+                    .entry(entity.start())
+                    .and_modify(|s| s.push_str("> "))
+                    .or_insert("> ".into());
+                inserts.entry(entity.end()).or_insert("".into());
+                modifiers.insert(entity.start(), |s| s.replace("\n", "\n> "));
             }
             t::MessageEntityKind::Mention
             | t::MessageEntityKind::Hashtag
@@ -192,8 +198,12 @@ pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityR
     (&positions)
         .iter()
         .zip(&positions[1..])
-        .flat_map(|(&i, &j)| [&content[i..j], &inserts[&j]])
-        .chain(Some(&content[*positions.last().unwrap()..]))
+        .flat_map(|(&i, &j)| {
+            let c = &content[i..j];
+            let c = modifiers.get(&i).map_or(c.to_string(), |m| m(c));
+            [c, inserts.remove(&j).unwrap()]
+        })
+        .chain(Some((&content[*positions.last().unwrap()..]).to_string()))
         .collect()
 }
 
