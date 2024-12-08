@@ -1,0 +1,14 @@
+[package]
+name = "discord-md"
+version = "3.0.0"
+edition = "2021"
+description = "Parser and generator for Discord's markdown"
+repository = "https://github.com/ciffelia/discord-md"
+license = "MIT OR Apache-2.0"
+keywords = ["discord", "markdown", "parser", "generator"]
+categories = ["parser-implementations"]
+exclude = ["/.github", "/.gitignore"]
+
+[dependencies]
+nom = "7.1.3"
+derive_more = "0.99.17"
