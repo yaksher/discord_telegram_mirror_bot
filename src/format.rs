@@ -7,12 +7,23 @@ pub fn discord_to_telegram_format(content: &str) -> String {
     fn element_to_telegram(element: &MarkdownElement) -> String {
         match element {
             MarkdownElement::Bold(x) => format!("<b>{}</b>", collection_to_telegram(x.content())),
-            MarkdownElement::ItalicsStar(x) => format!("<i>{}</i>", x.content()),
-            MarkdownElement::ItalicsUnderscore(x) => format!("<i>{}</i>", x.content()),
-            MarkdownElement::Strikethrough(x) => format!("<s>{}</s>", x.content()),
-            MarkdownElement::Underline(x) => format!("<u>{}</u>", x.content()),
+            MarkdownElement::ItalicsStar(x) => {
+                format!("<i>{}</i>", collection_to_telegram(x.content()))
+            }
+            MarkdownElement::ItalicsUnderscore(x) => {
+                format!("<i>{}</i>", collection_to_telegram(x.content()))
+            }
+            MarkdownElement::Strikethrough(x) => {
+                format!("<s>{}</s>", collection_to_telegram(x.content()))
+            }
+            MarkdownElement::Underline(x) => {
+                format!("<u>{}</u>", collection_to_telegram(x.content()))
+            }
             MarkdownElement::Spoiler(x) => {
-                format!("<tg-spoiler>{}</tg-spoiler>", x.content())
+                format!(
+                    "<tg-spoiler>{}</tg-spoiler>",
+                    collection_to_telegram(x.content())
+                )
             }
             MarkdownElement::OneLineCode(x) => format!("<code>{}</code>", x.content()),
             MarkdownElement::MultiLineCode(x) => {
@@ -26,24 +37,15 @@ pub fn discord_to_telegram_format(content: &str) -> String {
                     format!("<pre>{}</pre>", x.content())
                 }
             }
-            MarkdownElement::BlockQuote(x) => format!("<blockquote>{}</blockquote>", x.content()),
+            MarkdownElement::BlockQuote(x) => {
+                log::warn!("Discord-md blockquotes unsupported.");
+                collection_to_telegram(x.content())
+            }
             MarkdownElement::Plain(x) => x
                 .content()
                 .replace("&", "&amp;")
                 .replace("<", "&lt;")
                 .replace(">", "&gt;"),
-            // MarkdownElement::Bold(bold) => format!("*{}*", collection_to_telegram(bold.content())),
-            // MarkdownElement::ItalicsStar(italic) => {
-            //     format!("_{}_", collection_to_telegram(italic.content()))
-            // }
-            // MarkdownElement::ItalicsUnderscore(italic) => {
-            //     format!("_{}_", collection_to_telegram(italic.content()))
-            // }
-            // MarkdownElement::Strikethrough(strikethrough) => {
-            //     format!("~{}~", collection_to_telegram(strikethrough.content()))
-            // }
-            // // Other elements get passed directly to telegram's markdownv2 parser
-            // _ => element.to_string(),
         }
     }
 
@@ -55,7 +57,31 @@ pub fn discord_to_telegram_format(content: &str) -> String {
     let ast = discord_md::parse(content);
 
     // Convert AST to Telegram HTML
-    collection_to_telegram(&ast.content()).replace(".", ".")
+    let telegram_html = collection_to_telegram(&ast.content());
+
+    let mut in_blockquote = false;
+    let mut result = String::new();
+    const BLOCKQUOTE_PREFIX: &str = "&gt; ";
+    for line in telegram_html.lines() {
+        if line.starts_with(BLOCKQUOTE_PREFIX) {
+            if !in_blockquote {
+                result.push_str("<blockquote>");
+                in_blockquote = true;
+            }
+            result.push_str(&line[BLOCKQUOTE_PREFIX.len()..]);
+        } else {
+            if in_blockquote {
+                result.push_str("</blockquote>");
+                in_blockquote = false;
+            }
+            result.push_str(line);
+        }
+        result.push('\n');
+    }
+    if in_blockquote {
+        result.push_str("</blockquote>");
+    }
+    result
 }
 
 pub async fn discord_author_name(ctx: &impl d::CacheHttp, msg: &d::Message) -> String {

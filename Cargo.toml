@@ -27,3 +27,6 @@ base64 = "0.22.1"
 default-features = false
 features = ["builder", "cache", "client", "gateway", "http", "model", "utils", "rustls_backend"]
 version = "0.12.2"
+
+[patch.crates-io]
+discord-md = { path = "discord-md"}

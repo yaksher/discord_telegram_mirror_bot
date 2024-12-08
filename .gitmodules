@@ -1,0 +1,3 @@
+[submodule "discord-md"]
+	path = discord-md
+	url = git@github.com:ciffelia/discord-md.git
