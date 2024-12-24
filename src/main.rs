@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 mod db;
 mod format;
+mod model;
 
 use dashmap::DashMap;
 use sqlx::SqlitePool;

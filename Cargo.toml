@@ -20,6 +20,8 @@ futures = "0.3.30"
 dashmap = "6.0.1"
 toml = "0.8.15"
 base64 = "0.22.1"
+serde = { version = "1.0.216", features = ["derive", "serde_derive"] }
+bincode = "1.3.3"
 
 
 
