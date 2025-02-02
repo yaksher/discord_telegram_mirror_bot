@@ -100,7 +100,7 @@ impl d::EventHandler for DiscordState {
                 return;
             }
         };
-        let content = d::content_safe(&ctx, &msg.content, &d::ContentSafeOptions::default(), &[]);
+        let content = msg.content_safe(&ctx);
         let content = format::discord_to_telegram_format(&content);
         let author = format::discord_author_name(&ctx, &msg).await;
 
@@ -801,7 +801,13 @@ async fn reply_info(
                     ref_disc_message =
                         discord_request!(discord_http.get_message(discord_chat, mirror_id)).await;
                 }
-                ref_link = Some(mirror_id.link_ensured(cache_http, discord_chat, None).await);
+                let mut guild_id = None;
+                if let Ok(channel) = discord_chat.to_channel(cache_http).await {
+                    if let Some(c) = channel.guild() {
+                        guild_id = Some(c.guild_id);
+                    }
+                }
+                ref_link = Some(mirror_id.link(discord_chat, guild_id));
                 if let Some(msg) = ref_disc_message {
                     ref_nick = Some(format::discord_author_name(&cache_http, &msg).await);
                     ref_user = Some(msg.author);
