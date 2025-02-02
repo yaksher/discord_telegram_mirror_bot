@@ -633,6 +633,12 @@ impl d::EventHandler for DiscordState {
     }
 
     async fn reaction_add(&self, ctx: d::Context, reaction: d::Reaction) {
+        if reaction
+            .user_id
+            .is_some_and(|id| id == ctx.cache.current_user().id)
+        {
+            return;
+        }
         let Some(telegram_chat) = db::get_telegram_chat_id(reaction.channel_id) else {
             log::info!("Got reaction {reaction:?} in unregistered discord channel");
             return;
@@ -1090,6 +1096,64 @@ async fn reply_info(
     }
 }
 
+fn unicode_keycap(digit: usize) -> &'static str {
+    [
+        "\u{0031}\u{fe0f}\u{20e3}",
+        "\u{0032}\u{fe0f}\u{20e3}",
+        "\u{0033}\u{fe0f}\u{20e3}",
+        "\u{0034}\u{fe0f}\u{20e3}",
+        "\u{0035}\u{fe0f}\u{20e3}",
+        "\u{0036}\u{fe0f}\u{20e3}",
+        "\u{0037}\u{fe0f}\u{20e3}",
+        "\u{0038}\u{fe0f}\u{20e3}",
+        "\u{0039}\u{fe0f}\u{20e3}",
+        "\u{1f51f}",
+    ][digit]
+}
+
+async fn send_poll(
+    webhook: d::Webhook,
+    avatar_handle: tokio::task::JoinHandle<Option<Arc<str>>>,
+    discord_http: Arc<d::Http>,
+    poll: &t::Poll,
+    author: &str,
+) -> Option<d::Message> {
+    let embed = d::CreateEmbed::new()
+        .title(match (&poll.poll_type, poll.allows_multiple_answers) {
+            (t::PollType::Quiz, _) => "Quiz",
+            (_, false) => "Poll (pick one)",
+            (_, true) => "Poll (multiple)",
+        })
+        .description(&poll.question)
+        .fields(
+            poll.options
+                .iter()
+                .enumerate()
+                .map(|(i, opt)| (format!("Option {}", i + 1), &opt.text, false)),
+        );
+    let mut builder = d::ExecuteWebhook::new().username(author).embed(embed);
+    if let Ok(Some(avatar_url)) = avatar_handle.await {
+        builder = builder.avatar_url(&*avatar_url);
+    }
+    let discord_result = discord_request!(
+        webhook.execute(discord_http.clone(), true, builder.clone()),
+        edbg!("Poll")
+    )
+    .await
+    .flatten();
+    if let Some(msg) = &discord_result {
+        for i in 0..poll.options.len() {
+            _ = msg
+                .react(
+                    &discord_http,
+                    d::ReactionType::Unicode(unicode_keycap(i).to_string()),
+                )
+                .await;
+        }
+    }
+    discord_result
+}
+
 async fn handle_update(
     bot: t::Bot,
     me: t::Me,
@@ -1184,6 +1248,19 @@ async fn handle_update(
                     }
                 })
             };
+            if let Some(poll) = msg.poll() {
+                if let Some(discord_msg) =
+                    send_poll(webhook, avatar_handle, discord_http, poll, &author).await
+                {
+                    if let Err(e) =
+                        db::insert_mapping(&db, discord_msg.id, msg.id, telegram_chat.id, false)
+                            .await
+                    {
+                        log::error!("Failed to insert message mapping: {}", e);
+                    }
+                }
+                return Ok(());
+            }
             let mut message = d::ExecuteWebhook::new().username(&author);
             let mut embed = None;
 
