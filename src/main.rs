@@ -37,6 +37,7 @@ mod discord {
             event::MessageUpdateEvent,
             gateway::Ready,
             id::{ChannelId, GuildId, MessageId},
+            sticker::{StickerFormatType, StickerItem},
             webhook::{Webhook, WebhookChannel, WebhookGuild, WebhookType},
         },
         prelude::*,
@@ -80,12 +81,13 @@ macro_rules! edbg {
 }
 
 impl DiscordState {
-    async fn send_message_with_attachments(
+    async fn send_message(
         &self,
         telegram_chat: t::ChatId,
         msg_id: d::MessageId,
         text: &str,
         attachments: Vec<d::Attachment>,
+        mut stickers: Vec<d::StickerItem>,
         reply_to_message_id: Option<t::MessageId>,
     ) {
         enum AttachmentKind {
@@ -111,6 +113,14 @@ impl DiscordState {
             }
         }
 
+        fn skind(s: &d::StickerItem) -> AttachmentKind {
+            match s.format_type {
+                d::StickerFormatType::Gif | d::StickerFormatType::Apng => AK::Video,
+                d::StickerFormatType::Png => AK::Image,
+                _ => AK::Other,
+            }
+        }
+
         macro_rules! _if_method_may_spoiler {
             (send_photo, $code:expr) => {
                 $code
@@ -122,16 +132,16 @@ impl DiscordState {
         }
 
         macro_rules! _send_with_method {
-            ($method:ident, $a:expr, $url:expr, $caption:expr, $replyto:expr) => {
+            ($method:ident, $filename:expr, $url:expr, $caption:expr, $replyto:expr $(,)?) => {
                 async {
                     #[allow(unused_mut)]
                     let mut f = t::InputFile::url($url.clone());
                     _if_method_may_spoiler!($method, {
-                        f = f.file_name($a.filename.trim_start_matches("SPOILER_").to_string());
+                        f = f.file_name($filename.trim_start_matches("SPOILER_").to_string());
                     });
                     let mut s = self.telegram_bot.$method(telegram_chat, f);
                     _if_method_may_spoiler!($method, {
-                        s = s.has_spoiler($a.filename.starts_with("SPOILER_"));
+                        s = s.has_spoiler($filename.starts_with("SPOILER_"));
                     });
                     if let Some(caption) = $caption {
                         s = s.caption(caption).parse_mode(t::ParseMode::Html);
@@ -145,12 +155,12 @@ impl DiscordState {
         }
 
         macro_rules! send_with_attachment {
-            ($a:expr, $caption:expr, $replyto:expr) => {
+            ($a:expr, $caption:expr, $replyto:expr $(,)?) => {
                 async {
                     let a: &d::Attachment = $a;
                     let caption: Option<&str> = $caption;
                     let replyto: Option<t::MessageId> = $replyto;
-                    let url = match Url::parse($a.url.as_str()) {
+                    let url = match Url::parse(a.url.as_str()) {
                         Ok(url) => url,
                         Err(e) => {
                             log::error!("Failed to parse attachment url: {e}");
@@ -158,34 +168,88 @@ impl DiscordState {
                         }
                     };
                     match kind(a) {
-                        AK::Image => _send_with_method!(send_photo, a, url, caption, replyto).await,
-                        AK::Video => _send_with_method!(send_video, a, url, caption, replyto).await,
-                        AK::Audio => _send_with_method!(send_audio, a, url, caption, replyto).await,
+                        AK::Image => {
+                            _send_with_method!(send_photo, a.filename, url, caption, replyto).await
+                        }
+                        AK::Video => {
+                            _send_with_method!(send_video, a.filename, url, caption, replyto).await
+                        }
+                        AK::Audio => {
+                            _send_with_method!(send_audio, a.filename, url, caption, replyto).await
+                        }
                         AK::Other => {
-                            _send_with_method!(send_document, a, url, caption, replyto).await
+                            _send_with_method!(send_document, a.filename, url, caption, replyto)
+                                .await
                         }
                     }
                 }
             };
         }
 
+        macro_rules! send_with_sticker {
+            ($s:expr, $caption:expr, $replyto:expr $(,)?) => {
+                async {
+                    let s: &d::StickerItem = $s;
+                    let caption: Option<&str> = $caption;
+                    let replyto: Option<t::MessageId> = $replyto;
+                    let Some(url) = s.image_url() else {
+                        log::error!("Failed to get sticker url: {s:?}");
+                        return None;
+                    };
+                    let url = match Url::parse(url.as_str()) {
+                        Ok(url) => url,
+                        Err(e) => {
+                            log::error!("Failed to parse attachment url: {e}");
+                            return None;
+                        }
+                    };
+                    let filename = url
+                        .path_segments()
+                        .and_then(Iterator::last)
+                        .unwrap_or("sticker");
+                    match skind(s) {
+                        AK::Video => {
+                            _send_with_method!(send_video, filename, url, caption, replyto).await
+                        }
+                        AK::Image => {
+                            _send_with_method!(send_photo, filename, url, caption, replyto).await
+                        }
+                        _ => None,
+                    }
+                }
+            };
+        }
+
+        stickers.retain(|s| !matches!(skind(s), AK::Other));
+
         let mut attachments_processed = false;
-        let telegram_result: Vec<_> = if attachments.len() == 1 {
+        let total_attachments = attachments.len() + stickers.len();
+        let media_count = attachments
+            .iter()
+            .filter(|a| matches!(kind(a), AK::Image | AK::Video))
+            .count()
+            + stickers.len();
+
+        let telegram_result: Vec<_> = if total_attachments == 1 {
             attachments_processed = true;
-            send_with_attachment!(&attachments[0], Some(&text), reply_to_message_id)
-                .await
-                .into_iter()
-                .collect()
-        } else if attachments.len() > 1
-            && attachments
-                .iter()
-                .all(|a| matches!(kind(a), AK::Image | AK::Video))
-        {
-            attachments_processed = true;
+            if stickers.is_empty() {
+                send_with_attachment!(&attachments[0], Some(&text), reply_to_message_id)
+                    .await
+                    .into_iter()
+                    .collect()
+            } else {
+                send_with_sticker!(&stickers[0], Some(&text), reply_to_message_id)
+                    .await
+                    .into_iter()
+                    .collect()
+            }
+        } else if media_count >= 1 {
+            attachments_processed = total_attachments == media_count;
             let mut builder = self.telegram_bot.send_media_group(
                 telegram_chat,
                 attachments
                     .iter()
+                    .filter(|a| matches!(kind(a), AK::Image | AK::Video))
                     .map(|a| a.url.as_str())
                     .map(url::Url::parse)
                     .filter_map(|url| {
@@ -201,6 +265,24 @@ impl DiscordState {
                             kind(a),
                         )
                     })
+                    .chain(stickers.iter().filter_map(|s| {
+                        let Some(url) = s.image_url() else {
+                            return None;
+                        };
+                        let url = match Url::parse(url.as_str()) {
+                            Ok(url) => url,
+                            Err(e) => {
+                                log::error!("Failed to parse attachment url: {e}");
+                                return None;
+                            }
+                        };
+                        let filename = url
+                            .path_segments()
+                            .and_then(Iterator::last)
+                            .unwrap_or("sticker")
+                            .to_string();
+                        Some((t::InputFile::url(url).file_name(filename), false, skind(s)))
+                    }))
                     .enumerate()
                     .map(|(i, (m, s, k))| match k {
                         AK::Image => t::InputMedia::Photo({
@@ -236,6 +318,9 @@ impl DiscordState {
                 .flatten()
                 .collect()
         } else {
+            vec![]
+        };
+        let telegram_result = if telegram_result.is_empty() {
             let builder = self
                 .telegram_bot
                 .send_message(telegram_chat, text)
@@ -250,6 +335,8 @@ impl DiscordState {
                 .await
                 .into_iter()
                 .collect()
+        } else {
+            telegram_result
         };
 
         for telegram_msg in telegram_result {
@@ -270,7 +357,7 @@ impl DiscordState {
             return;
         }
 
-        let futs = attachments
+        let att_futs = attachments
             .into_iter()
             .map(|a| async move {
                 if let Some(telegram_msg) = send_with_attachment!(&a, None, None).await {
@@ -283,7 +370,21 @@ impl DiscordState {
                 }
             })
             .collect::<Vec<_>>();
-        futures::future::join_all(futs).await;
+        let stick_futs = stickers
+            .into_iter()
+            .map(|s| async move {
+                if let Some(telegram_msg) = send_with_sticker!(&s, None, None).await {
+                    if let Err(e) =
+                        db::insert_mapping(&self.db, msg_id, telegram_msg.id, telegram_chat, true)
+                            .await
+                    {
+                        log::error!("Failed to insert message mapping: {}", e);
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        futures::future::join_all(att_futs).await;
+        futures::future::join_all(stick_futs).await;
     }
 }
 
@@ -344,13 +445,31 @@ impl d::EventHandler for DiscordState {
                 );
             }
         }
+        if msg
+            .sticker_items
+            .iter()
+            .chain(
+                msg.message_snapshots
+                    .iter()
+                    .flat_map(|s| s.sticker_items.iter()),
+            )
+            .any(|s| matches!(s.format_type, d::StickerFormatType::Lottie))
+        {
+            // since this is just a courtesy notification, ignore whether it succeeded
+            let _ = msg.reply(&ctx, "Lottie format stickers (including unfortunately Discord's default stickers) are unsupported.").await;
+        }
 
-        if has_body || !msg.attachments.is_empty() {
-            self.send_message_with_attachments(
+        if msg.message_snapshots.len() == 0
+            || has_body
+            || !msg.attachments.is_empty()
+            || !msg.sticker_items.is_empty()
+        {
+            self.send_message(
                 telegram_chat,
                 msg.id,
                 &text,
                 msg.attachments,
+                msg.sticker_items,
                 reply_to_message_id,
             )
             .await;
@@ -373,11 +492,12 @@ impl d::EventHandler for DiscordState {
             let content = format::discord_to_telegram_format(&content);
 
             let text = format!("<b>{author}</b> (forwarded)\n{content}");
-            self.send_message_with_attachments(
+            self.send_message(
                 telegram_chat,
                 msg.id,
                 &text,
                 snapshot.attachments,
+                snapshot.sticker_items,
                 reply_to_message_id,
             )
             .await;
@@ -1443,6 +1563,10 @@ async fn main() {
     pretty_env_logger::init();
 
     let db_pool = db::init_db().await.expect("Failed to initialize database");
+    let resources_dir = std::path::Path::new("resources");
+    if !resources_dir.exists() {
+        std::fs::create_dir(resources_dir).expect("Failed to create resources directory");
+    }
 
     let telegram_bot = t::Bot::from_env();
 
