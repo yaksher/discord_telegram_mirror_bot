@@ -1640,10 +1640,6 @@ async fn main() {
     pretty_env_logger::init();
 
     let db_pool = db::init_db().await.expect("Failed to initialize database");
-    let resources_dir = std::path::Path::new("resources");
-    if !resources_dir.exists() {
-        std::fs::create_dir(resources_dir).expect("Failed to create resources directory");
-    }
 
     let telegram_bot = t::Bot::from_env();
 
