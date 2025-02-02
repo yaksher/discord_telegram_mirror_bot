@@ -43,7 +43,7 @@ mod discord {
         Error,
     };
 }
-use serenity::prelude::*;
+use serenity::{all::ContentSafeOptions, prelude::*};
 
 use discord as d;
 use telegram as t;
@@ -79,63 +79,15 @@ macro_rules! edbg {
     };
 }
 
-#[d::async_trait]
-impl d::EventHandler for DiscordState {
-    // Set a handler for the `message` event - so that whenever a new message
-    // is received - the closure (or function) passed will be called.
-    //
-    // Event handlers are dispatched through a threadpool, and so multiple
-    // events can be dispatched simultaneously.
-    async fn message(&self, ctx: d::Context, msg: d::Message) {
-        if msg.author.id == ctx.cache.current_user().id {
-            return;
-        }
-        if msg.webhook_id.is_some() {
-            return;
-        }
-        let telegram_chat = match db::get_telegram_chat_id(msg.channel_id) {
-            Some(chat_id) => chat_id,
-            None => {
-                log::info!("Got message {msg:?} in unregistered discord channel");
-                return;
-            }
-        };
-        let content = msg.content_safe(&ctx);
-        let content = format::discord_to_telegram_format(&content);
-        let author = format::discord_author_name(&ctx, &msg).await;
-
-        let mut text = format!("<b>{author}</b>\n{content}");
-
-        let mut reply_to_message_id = None;
-
-        if let Some(ref_msg) = msg.referenced_message.clone() {
-            // if a message is being replied to, find the original message in
-            // the database and reply to that message's reflection
-            let found_mirror = match db::get_telegram_message_id(&self.db, ref_msg.id.into())
-                .await
-                .as_deref()
-            {
-                Ok(&[(mirror_id, _), ..]) => {
-                    reply_to_message_id = Some(mirror_id);
-                    true
-                }
-                Ok([]) => false,
-                Err(e) => {
-                    log::error!("Database lookup failed: {e}");
-                    false
-                }
-            };
-            // if we couldn't find the message in the database, copy the message
-            // as a block quote
-            if !found_mirror {
-                let ref_content = format::discord_to_telegram_format(&ref_msg.content);
-                let ref_author = format::discord_author_name(&ctx, &ref_msg).await;
-                text = format!(
-                    "<blockquote expandable><b>{ref_author}</b>\n{ref_content}</blockquote>\n{text}"
-                );
-            }
-        }
-
+impl DiscordState {
+    async fn send_message_with_attachments(
+        &self,
+        telegram_chat: t::ChatId,
+        msg_id: d::MessageId,
+        text: &str,
+        attachments: Vec<d::Attachment>,
+        reply_to_message_id: Option<t::MessageId>,
+    ) {
         enum AttachmentKind {
             Image,
             Video,
@@ -218,22 +170,21 @@ impl d::EventHandler for DiscordState {
         }
 
         let mut attachments_processed = false;
-        let telegram_result: Vec<_> = if msg.attachments.len() == 1 {
+        let telegram_result: Vec<_> = if attachments.len() == 1 {
             attachments_processed = true;
-            send_with_attachment!(&msg.attachments[0], Some(&text), reply_to_message_id)
+            send_with_attachment!(&attachments[0], Some(&text), reply_to_message_id)
                 .await
                 .into_iter()
                 .collect()
-        } else if msg.attachments.len() > 1
-            && msg
-                .attachments
+        } else if attachments.len() > 1
+            && attachments
                 .iter()
                 .all(|a| matches!(kind(a), AK::Image | AK::Video))
         {
             attachments_processed = true;
             let mut builder = self.telegram_bot.send_media_group(
                 telegram_chat,
-                msg.attachments
+                attachments
                     .iter()
                     .map(|a| a.url.as_str())
                     .map(url::Url::parse)
@@ -242,7 +193,7 @@ impl d::EventHandler for DiscordState {
                             .ok()
                     })
                     .map(t::InputFile::url)
-                    .zip(msg.attachments.iter())
+                    .zip(attachments.iter())
                     .map(|(m, a)| {
                         (
                             m.file_name(a.filename.trim_start_matches("SPOILER_").to_string()),
@@ -255,7 +206,7 @@ impl d::EventHandler for DiscordState {
                         AK::Image => t::InputMedia::Photo({
                             let mut m = t::InputMediaPhoto::new(m);
                             if i == 0 {
-                                m = m.caption(&text).parse_mode(t::ParseMode::Html);
+                                m = m.caption(text).parse_mode(t::ParseMode::Html);
                             }
                             if s {
                                 m = m.spoiler();
@@ -265,7 +216,7 @@ impl d::EventHandler for DiscordState {
                         AK::Video => t::InputMedia::Video({
                             let mut m = t::InputMediaVideo::new(m);
                             if i == 0 {
-                                m = m.caption(&text).parse_mode(t::ParseMode::Html);
+                                m = m.caption(text).parse_mode(t::ParseMode::Html);
                             }
                             if s {
                                 m = m.spoiler();
@@ -295,7 +246,7 @@ impl d::EventHandler for DiscordState {
                 builder
             };
 
-            telegram_request!(s.send_ref(), edbg!(author, msg.content, content),)
+            telegram_request!(s.send_ref(), edbg!(text),)
                 .await
                 .into_iter()
                 .collect()
@@ -304,7 +255,7 @@ impl d::EventHandler for DiscordState {
         for telegram_msg in telegram_result {
             if let Err(e) = db::insert_mapping(
                 &self.db,
-                msg.id,
+                msg_id,
                 telegram_msg.id,
                 telegram_chat,
                 telegram_msg.caption().is_some(),
@@ -319,13 +270,12 @@ impl d::EventHandler for DiscordState {
             return;
         }
 
-        let futs = msg
-            .attachments
+        let futs = attachments
             .into_iter()
             .map(|a| async move {
                 if let Some(telegram_msg) = send_with_attachment!(&a, None, None).await {
                     if let Err(e) =
-                        db::insert_mapping(&self.db, msg.id, telegram_msg.id, telegram_chat, true)
+                        db::insert_mapping(&self.db, msg_id, telegram_msg.id, telegram_chat, true)
                             .await
                     {
                         log::error!("Failed to insert message mapping: {}", e);
@@ -334,6 +284,104 @@ impl d::EventHandler for DiscordState {
             })
             .collect::<Vec<_>>();
         futures::future::join_all(futs).await;
+    }
+}
+
+#[d::async_trait]
+impl d::EventHandler for DiscordState {
+    // Set a handler for the `message` event - so that whenever a new message
+    // is received - the closure (or function) passed will be called.
+    //
+    // Event handlers are dispatched through a threadpool, and so multiple
+    // events can be dispatched simultaneously.
+    async fn message(&self, ctx: d::Context, msg: d::Message) {
+        if msg.author.id == ctx.cache.current_user().id {
+            return;
+        }
+        if msg.webhook_id.is_some() {
+            return;
+        }
+        let telegram_chat = match db::get_telegram_chat_id(msg.channel_id) {
+            Some(chat_id) => chat_id,
+            None => {
+                log::info!("Got message {msg:?} in unregistered discord channel");
+                return;
+            }
+        };
+        let content = msg.content_safe(&ctx);
+        let has_body = !content.is_empty();
+        let content = format::discord_to_telegram_format(&content);
+        let author = format::discord_author_name(&ctx, &msg).await;
+
+        let mut text = format!("<b>{author}</b>\n{content}");
+
+        let mut reply_to_message_id = None;
+
+        if let Some(ref_msg) = msg.referenced_message.clone() {
+            // if a message is being replied to, find the original message in
+            // the database and reply to that message's reflection
+            let found_mirror = match db::get_telegram_message_id(&self.db, ref_msg.id.into())
+                .await
+                .as_deref()
+            {
+                Ok(&[(mirror_id, _), ..]) => {
+                    reply_to_message_id = Some(mirror_id);
+                    true
+                }
+                Ok([]) => false,
+                Err(e) => {
+                    log::error!("Database lookup failed: {e}");
+                    false
+                }
+            };
+            // if we couldn't find the message in the database, copy the message
+            // as a block quote
+            if !found_mirror {
+                let ref_content = format::discord_to_telegram_format(&ref_msg.content);
+                let ref_author = format::discord_author_name(&ctx, &ref_msg).await;
+                text = format!(
+                    "<blockquote expandable><b>{ref_author}</b>\n{ref_content}</blockquote>\n{text}"
+                );
+            }
+        }
+
+        if has_body || !msg.attachments.is_empty() {
+            self.send_message_with_attachments(
+                telegram_chat,
+                msg.id,
+                &text,
+                msg.attachments,
+                reply_to_message_id,
+            )
+            .await;
+            reply_to_message_id = None;
+        }
+        if msg.message_snapshots.len() > 0 {
+            if msg.message_snapshots.len() > 1 {
+                log::error!(
+                    "More than 1 forwarded message is unsupported, {:?}",
+                    &msg.message_snapshots
+                )
+            }
+            let snapshot = msg
+                .message_snapshots
+                .into_iter()
+                .next()
+                .expect("length > 0");
+            let content =
+                d::content_safe(&ctx, snapshot.content, &ContentSafeOptions::default(), &[]);
+            let content = format::discord_to_telegram_format(&content);
+
+            let text = format!("<b>{author}</b> (forwarded)\n{content}");
+            self.send_message_with_attachments(
+                telegram_chat,
+                msg.id,
+                &text,
+                snapshot.attachments,
+                reply_to_message_id,
+            )
+            .await;
+        }
     }
 
     async fn message_update(
