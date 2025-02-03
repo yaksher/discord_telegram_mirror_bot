@@ -1098,6 +1098,7 @@ async fn reply_info(
 
 fn unicode_keycap(digit: usize) -> &'static str {
     [
+        "\u{0030}\u{fe0f}\u{20e3}",
         "\u{0031}\u{fe0f}\u{20e3}",
         "\u{0032}\u{fe0f}\u{20e3}",
         "\u{0033}\u{fe0f}\u{20e3}",
@@ -1107,7 +1108,7 @@ fn unicode_keycap(digit: usize) -> &'static str {
         "\u{0037}\u{fe0f}\u{20e3}",
         "\u{0038}\u{fe0f}\u{20e3}",
         "\u{0039}\u{fe0f}\u{20e3}",
-        "\u{1f51f}",
+        // "\u{1f51f}",
     ][digit]
 }
 
@@ -1129,7 +1130,7 @@ async fn send_poll(
             poll.options
                 .iter()
                 .enumerate()
-                .map(|(i, opt)| (format!("Option {}", i + 1), &opt.text, false)),
+                .map(|(i, opt)| (format!("Option {}", i), &opt.text, false)),
         );
     let mut builder = d::ExecuteWebhook::new().username(author).embed(embed);
     if let Ok(Some(avatar_url)) = avatar_handle.await {
