@@ -771,7 +771,7 @@ impl d::EventHandler for DiscordState {
     //
     // In this case, just print what the current user's username is.
     async fn ready(&self, _ctx: d::Context, ready: d::Ready) {
-        log::warn!("{} is connected!", ready.user.name);
+        log::info!("{} is connected!", ready.user.name);
     }
 }
 
@@ -1663,7 +1663,7 @@ async fn main() {
     let discord_cache = discord_client.cache.clone();
     let discord_http = discord_client.http.clone();
 
-    log::warn!("Starting telegram...");
+    log::info!("Starting telegram...");
 
     let webhook_cache = Arc::new(DashMap::<d::ChannelId, d::Webhook>::new());
     let avatar_cache = Arc::new(DashMap::<t::UserId, AvatarCacheRecord>::new());
