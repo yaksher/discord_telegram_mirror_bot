@@ -451,6 +451,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dyn_serde"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42501063765b768d479b7c61ff59de45bbe9ab37675d13a253647f2d4748a1d6"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "either"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2296,6 +2305,7 @@ dependencies = [
  "dashmap 6.0.1",
  "discord-md",
  "dotenv",
+ "dyn_serde",
  "eyre",
  "futures",
  "lazy_static",
