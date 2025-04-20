@@ -1226,6 +1226,26 @@ async fn handle_update(
 
     match upd.kind {
         t::UpdateKind::Message(msg) => {
+            if let Some(msg) = msg.pinned_message() {
+                match db::get_discord_message_id(&db, msg.id(), msg.chat().id)
+                    .await
+                    .as_deref()
+                {
+                    Ok(&[discord_id, ..]) => {
+                        let _ = discord_request!(discord_http.pin_message(
+                            discord_chat,
+                            discord_id,
+                            Some("Telegram pin")
+                        ))
+                        .await;
+                    }
+                    Ok([]) => {
+                        log::info!("TODO: implement handling of pins of unmapped messages I guess")
+                    }
+                    Err(e) => log::error!("Failed to get message mapping: {}", e),
+                }
+                return Ok(());
+            }
             let author = format::telegram_author_name(&msg);
             let text = msg
                 .text()
