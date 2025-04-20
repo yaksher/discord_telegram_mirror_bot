@@ -160,7 +160,7 @@ pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityR
             t::MessageEntityKind::CustomEmoji { custom_emoji_id } => {
                 let _ = custom_emoji_id;
             }
-            t::MessageEntityKind::Blockquote => {
+            t::MessageEntityKind::Blockquote | t::MessageEntityKind::ExpandableBlockquote => {
                 insert(&entity, "> ".to_string(), "".to_string());
                 modifiers.insert(entity.start(), |s| s.replace("\n", "\n> "));
             }
@@ -204,15 +204,17 @@ pub fn telegram_author_name(msg: &t::Message) -> String {
 
 pub fn telegram_reactor_name(reaction: &t::MessageReactionUpdated) -> String {
     reaction
-        .user
+        .user()
         .as_ref()
         .map(|u| u.full_name())
         .or_else(|| {
             reaction
-                .actor_chat
+                .actor
+                .chat()
                 .as_ref()
                 .and_then(|c| c.title().map(Into::into))
         })
+        .or_else(|| reaction.actor.user().as_ref().map(|u| u.full_name()))
         .unwrap_or("Internal Error".into())
 }
 
@@ -271,6 +273,9 @@ pub fn filter_telegram_reactions(reactions: &[t::ReactionType]) -> Vec<String> {
         .map(|r| match r {
             t::ReactionType::Emoji { emoji } => emoji.replace("❤", "❤️"),
             t::ReactionType::CustomEmoji { custom_emoji_id } => custom_emoji_id.to_string(),
+            t::ReactionType::Paid => {
+                "paid reaction [the api doesn't give me any other info lmao]".into()
+            }
         })
         .collect()
 }
