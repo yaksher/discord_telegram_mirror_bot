@@ -9,14 +9,13 @@ use tokio::time::Instant;
 use std::{env, future::IntoFuture, sync::Arc, time::Duration};
 
 // use tokio::sync::RwLock;
-#[allow(unused_imports)]
 mod telegram {
     pub use teloxide::errors::{DownloadError, RequestError};
     pub use teloxide::prelude::*;
     pub use teloxide::types::*;
 }
 
-use teloxide::{dptree::endpoint, net::Download, prelude::*};
+use teloxide::{net::Download, prelude::*};
 use url::Url;
 
 use dotenv;
@@ -999,9 +998,15 @@ async fn reply_info(
                 log::error!("Database lookup failed: {e}");
             }
         }
-        let ref_text = ref_msg
-            .text()
-            .zip(ref_msg.parse_entities())
+        let ref_text = msg
+            .quote()
+            .map(|q| {
+                (
+                    q.text.as_str(),
+                    t::MessageEntityRef::parse(&q.text, &q.entities),
+                )
+            })
+            .or_else(|| ref_msg.text().zip(ref_msg.parse_entities()))
             .or_else(|| ref_msg.caption().zip(ref_msg.parse_caption_entities()))
             .map(|(t, e)| format::telegram_to_discord_format(t, e))
             .unwrap_or_default();
@@ -1028,10 +1033,15 @@ async fn reply_info(
             };
             (ref_author, ref_text)
         };
-        let reply_str = if let Some(link) = ref_link {
-            format!("[replying to]({link})")
+        let reply_str = if msg.quote().is_some() {
+            "quoting"
         } else {
-            "replying to".to_string()
+            "replying to"
+        };
+        let reply_str = if let Some(link) = ref_link {
+            format!("[{reply_str}]({link})")
+        } else {
+            reply_str.to_string()
         };
         let mut embed_author = d::CreateEmbedAuthor::new(ref_nick.as_ref().unwrap_or(&ref_author));
         if include_author_icon {
@@ -1688,7 +1698,7 @@ async fn main() {
     let webhook_cache = Arc::new(DashMap::<d::ChannelId, d::Webhook>::new());
     let avatar_cache = Arc::new(DashMap::<t::UserId, AvatarCacheRecord>::new());
 
-    let telegram_handler = endpoint(handle_update);
+    let telegram_handler = t::dptree::endpoint(handle_update);
 
     let mut telegram_dispatch = Dispatcher::builder(telegram_bot, telegram_handler)
         .dependencies(dptree::deps![
