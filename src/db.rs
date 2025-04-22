@@ -5,13 +5,17 @@ use sqlx::{sqlite::SqlitePool, Row};
 use std::fs;
 use toml::Table;
 
+use crate::discord as d;
+use crate::telegram as t;
+
 lazy_static! {
     static ref DISCORD_TO_TELEGRAM_CACHE: DashMap<d::ChannelId, t::ChatId> = DashMap::new();
     static ref TELEGRAM_TO_DISCORD_CACHE: DashMap<t::ChatId, (d::ChannelId, Option<String>)> =
         DashMap::new();
+    static ref ADMINS: tokio::sync::RwLock<Vec<d::UserId>> = vec![].into();
 }
 
-const CHAT_MAPPING_FILE: &str = "chat_mappings.toml";
+const CONFIG_FILE: &str = "config.toml";
 const MESSAGE_MAPPING_DB: &str = "messages.db";
 
 pub async fn init_db() -> Result<SqlitePool> {
@@ -61,13 +65,10 @@ pub async fn init_db() -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
-    load_chat_mappings()?;
+    load_config().await?;
 
     Ok(pool)
 }
-
-use crate::discord as d;
-use crate::telegram as t;
 
 pub async fn insert_mapping(
     pool: &SqlitePool,
@@ -276,28 +277,43 @@ pub async fn remove_reaction_mapping_by_telegram(
     Ok(())
 }
 
-fn load_chat_mappings() -> Result<()> {
-    if !std::path::Path::new(CHAT_MAPPING_FILE).exists() {
-        fs::write(CHAT_MAPPING_FILE, "")?;
+async fn load_config() -> Result<()> {
+    if !std::path::Path::new(CONFIG_FILE).exists() {
+        fs::write(CONFIG_FILE, "")?;
     }
 
-    let content = fs::read_to_string(CHAT_MAPPING_FILE)?;
-    let mappings: Table = toml::from_str(&content)?;
+    let content = fs::read_to_string(CONFIG_FILE)?;
+    let config: Table = toml::from_str(&content)?;
 
-    for (discord_channel_id, telegram_chat_id) in mappings.iter() {
-        let discord_channel_id = d::ChannelId::from(discord_channel_id.parse::<u64>()?);
-        let vals = telegram_chat_id.as_array().unwrap();
-        let telegram_chat_id = t::ChatId(vals[0].as_integer().unwrap() as i64);
-        let webhook_url = vals.get(1).and_then(|v| v.as_str()).map(String::from);
+    // Load chat mappings
+    if let Some(chat_mappings) = config.get("chat_mappings").and_then(|v| v.as_table()) {
+        for (discord_channel_id, telegram_chat_id) in chat_mappings.iter() {
+            let discord_channel_id = d::ChannelId::from(discord_channel_id.parse::<u64>()?);
+            let vals = telegram_chat_id.as_array().unwrap();
+            let telegram_chat_id = t::ChatId(vals[0].as_integer().unwrap() as i64);
+            let webhook_url = vals.get(1).and_then(|v| v.as_str()).map(String::from);
 
-        DISCORD_TO_TELEGRAM_CACHE.insert(discord_channel_id, telegram_chat_id);
-        TELEGRAM_TO_DISCORD_CACHE.insert(telegram_chat_id, (discord_channel_id, webhook_url));
+            DISCORD_TO_TELEGRAM_CACHE.insert(discord_channel_id, telegram_chat_id);
+            TELEGRAM_TO_DISCORD_CACHE.insert(telegram_chat_id, (discord_channel_id, webhook_url));
+        }
     }
+
+    // Load admins
+    *ADMINS.write().await = config
+        .get("admins")
+        .and_then(|t| t.get("users"))
+        .and_then(|v| v.as_array())
+        .unwrap_or(&vec![])
+        .into_iter()
+        .filter_map(|u| u.as_integer())
+        .map(|i| i as u64)
+        .map(Into::into)
+        .collect();
 
     Ok(())
 }
 
-fn save_chat_mappings() -> Result<()> {
+async fn save_config() -> Result<()> {
     let mut mappings = Table::new();
 
     for entry in TELEGRAM_TO_DISCORD_CACHE.iter() {
@@ -308,8 +324,26 @@ fn save_chat_mappings() -> Result<()> {
         mappings.insert(entry.value().0.to_string(), toml::Value::Array(out));
     }
 
-    let toml_string = toml::to_string(&mappings)?;
-    fs::write(CHAT_MAPPING_FILE, toml_string)?;
+    let mut admins = Table::new();
+    admins.insert(
+        "users".to_string(),
+        toml::Value::Array(
+            ADMINS
+                .read()
+                .await
+                .iter()
+                .copied()
+                .map(Into::<u64>::into)
+                .map(|i| toml::Value::Integer(i as i64))
+                .collect(),
+        ),
+    );
+    let mut config = Table::new();
+    config.insert("chat_mappings".to_string(), toml::Value::Table(mappings));
+    config.insert("admins".to_string(), toml::Value::Table(admins));
+
+    let toml_string = toml::to_string(&config)?;
+    fs::write(CONFIG_FILE, toml_string)?;
 
     Ok(())
 }
@@ -324,7 +358,7 @@ pub async fn set_chat_mapping(
     TELEGRAM_TO_DISCORD_CACHE.insert(telegram_chat_id, (discord_channel_id, webhook_url));
 
     // Save the updated mappings to the TOML file
-    save_chat_mappings()
+    save_config().await
 }
 
 pub enum RemovalChatId {
@@ -343,7 +377,11 @@ pub async fn remove_chat_mapping(id: RemovalChatId) -> Result<()> {
         }
     }
 
-    save_chat_mappings()
+    save_config().await
+}
+
+pub async fn admins() -> Vec<d::UserId> {
+    ADMINS.read().await.clone()
 }
 
 pub fn get_telegram_chat_id(discord_channel_id: d::ChannelId) -> Option<t::ChatId> {

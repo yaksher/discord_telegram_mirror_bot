@@ -31,7 +31,7 @@ mod discord {
         Command, CommandInteraction, CommandOptionType, Interaction,
     };
     pub use serenity::{
-        all::{content_safe, ContentSafeOptions},
+        all::{content_safe, ContentSafeOptions, UserId},
         async_trait,
         builder::{
             CreateAllowedMentions, CreateAttachment, CreateEmbed, CreateEmbedAuthor, CreateMessage,
@@ -626,14 +626,19 @@ impl DiscordState {
         ctx: &Context,
         autocomplete: &d::CommandInteraction,
     ) {
-        let choices = self
-            .get_available_telegram_chats()
-            .await
-            .into_iter()
-            // .filter(|chat| chat.title.to_lowercase().contains(&input))
-            .take(25)
-            .map(|(id, title)| d::AutocompleteChoice::new(format!("{} ({})", title, id.0), id.0))
-            .collect::<Vec<_>>();
+        let choices = if db::admins().await.contains(&autocomplete.user.id) {
+            self.get_available_telegram_chats()
+                .await
+                .into_iter()
+                // .filter(|chat| chat.title.to_lowercase().contains(&input))
+                .take(25)
+                .map(|(id, title)| {
+                    d::AutocompleteChoice::new(format!("{} ({})", title, id.0), id.0)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
 
         if let Err(e) = ctx
             .http

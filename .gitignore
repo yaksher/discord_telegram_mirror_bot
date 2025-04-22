@@ -1,5 +1,5 @@
 /target
 .env
 messages.db
-chat_mappings.toml
+config.toml
 .vscode
