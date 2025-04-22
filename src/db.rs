@@ -49,6 +49,18 @@ pub async fn init_db() -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS telegram_chats (
+            chat_id BIGINT PRIMARY KEY,
+            title TEXT NOT NULL,
+            is_member BOOLEAN NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
     load_chat_mappings()?;
 
     Ok(pool)
@@ -312,9 +324,26 @@ pub async fn set_chat_mapping(
     TELEGRAM_TO_DISCORD_CACHE.insert(telegram_chat_id, (discord_channel_id, webhook_url));
 
     // Save the updated mappings to the TOML file
-    save_chat_mappings()?;
+    save_chat_mappings()
+}
 
-    Ok(())
+pub enum RemovalChatId {
+    Discord(d::ChannelId),
+    Telegram(t::ChatId),
+}
+pub async fn remove_chat_mapping(id: RemovalChatId) -> Result<()> {
+    match id {
+        RemovalChatId::Discord(id) => {
+            DISCORD_TO_TELEGRAM_CACHE.remove(&id);
+            TELEGRAM_TO_DISCORD_CACHE.retain(|_, (stored_id, _)| *stored_id != id);
+        }
+        RemovalChatId::Telegram(id) => {
+            TELEGRAM_TO_DISCORD_CACHE.remove(&id);
+            DISCORD_TO_TELEGRAM_CACHE.retain(|_, stored_id| *stored_id != id);
+        }
+    }
+
+    save_chat_mappings()
 }
 
 pub fn get_telegram_chat_id(discord_channel_id: d::ChannelId) -> Option<t::ChatId> {
@@ -329,4 +358,48 @@ pub fn get_discord_channel_id(
     TELEGRAM_TO_DISCORD_CACHE
         .get(&telegram_chat_id)
         .map(|v| v.clone())
+}
+
+pub async fn get_telegram_chats(
+    pool: &SqlitePool,
+) -> Result<Vec<(t::ChatId, String)>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        SELECT chat_id, title
+        FROM telegram_chats
+        WHERE is_member = 1
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map(|r| {
+        r.into_iter()
+            .map(|(id, title)| (t::ChatId(id), title))
+            .collect()
+    })
+}
+
+pub async fn update_chat_membership(
+    pool: &SqlitePool,
+    chat_id: t::ChatId,
+    title: &str,
+    is_member: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO telegram_chats (chat_id, title, is_member)
+        VALUES (?, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET
+            title = excluded.title,
+            is_member = excluded.is_member,
+            updated_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(chat_id.0)
+    .bind(title)
+    .bind(is_member)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }

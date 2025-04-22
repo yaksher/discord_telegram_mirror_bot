@@ -22,6 +22,14 @@ use dotenv;
 
 #[allow(unused_imports)]
 mod discord {
+    pub use serenity::builder::{
+        AutocompleteChoice, CreateAutocompleteResponse, CreateCommand, CreateCommandOption,
+        CreateInteractionResponse, CreateInteractionResponseMessage,
+    };
+    // pub use serenity::model::application::interaction::InteractionResponseType;
+    pub use serenity::model::application::{
+        Command, CommandInteraction, CommandOptionType, Interaction,
+    };
     pub use serenity::{
         all::{content_safe, ContentSafeOptions},
         async_trait,
@@ -43,7 +51,10 @@ mod discord {
         Error,
     };
 }
-use serenity::{all::ContentSafeOptions, prelude::*};
+use serenity::{
+    all::{ContentSafeOptions, Permissions},
+    prelude::*,
+};
 
 use discord as d;
 use telegram as t;
@@ -384,6 +395,260 @@ impl DiscordState {
             .collect::<Vec<_>>();
         futures::future::join_all(att_futs).await;
         futures::future::join_all(stick_futs).await;
+    }
+
+    async fn get_available_telegram_chats(&self) -> Vec<(t::ChatId, String)> {
+        db::get_telegram_chats(&self.db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&(id, _)| db::get_discord_channel_id(id).is_none())
+            .collect()
+    }
+
+    async fn register_commands(&self, http: &Arc<d::Http>) -> Result<(), d::Error> {
+        discord_request!(d::Command::create_global_command(
+            http,
+            d::CreateCommand::new("bridge")
+                .description("Bridge a Telegram chat to this Discord channel")
+                .default_member_permissions(Permissions::MANAGE_CHANNELS)
+                .add_option(
+                    d::CreateCommandOption::new(
+                        d::CommandOptionType::Integer,
+                        "chat",
+                        "The Telegram chat to bridge",
+                    )
+                    .required(true)
+                    .set_autocomplete(true),
+                ),
+        ))
+        .await;
+        discord_request!(d::Command::create_global_command(
+            http,
+            d::CreateCommand::new("unbridge")
+                .description("Remove the Telegram chat bridge in this Discord channel")
+                .default_member_permissions(Permissions::MANAGE_CHANNELS),
+        ))
+        .await;
+        Ok(())
+    }
+
+    async fn handle_bridge_command(&self, ctx: &Context, command: &d::CommandInteraction) {
+        let chat_id = command
+            .data
+            .options
+            .get(0)
+            .and_then(|opt| opt.value.as_i64());
+
+        if let Some(existing_telegram_channel) = db::get_telegram_chat_id(command.channel_id) {
+            let reply = command
+                .create_response(
+                    &ctx.http,
+                    d::CreateInteractionResponse::Message(
+                        d::CreateInteractionResponseMessage::new()
+                            .content(format!(
+                                "This Discord channel is already bridged to a Telegram chat: <#{}>.\nUse /unbridge to remove that bridge.",
+                                existing_telegram_channel
+                            ))
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            let out = match reply {
+                Ok(_) => (),
+                Err(e) => log::error!("Failed to respond to command: {}", e),
+            };
+            return out;
+        }
+
+        let response = match chat_id {
+            Some(chat_id) => {
+                let telegram_chat_id = t::ChatId(chat_id);
+
+                // Check if this Telegram chat is already mapped to a Discord channel
+                if let Some((existing_discord_channel, _)) =
+                    db::get_discord_channel_id(telegram_chat_id)
+                {
+                    let reply = command
+                        .create_response(
+                            &ctx.http,
+                            d::CreateInteractionResponse::Message(
+                                d::CreateInteractionResponseMessage::new()
+                                    .content(format!(
+                                        "This Telegram chat is already bridged to another Discord channel: <#{}>",
+                                        existing_discord_channel
+                                    ))
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    let out = match reply {
+                        Ok(_) => (),
+                        Err(e) => log::error!("Failed to respond to command: {}", e),
+                    };
+                    return out;
+                }
+
+                // Verify that the bot is a member of the chat by trying to get chat info
+                let get_chat_result = telegram_request!(
+                    self.telegram_bot.get_chat(telegram_chat_id),
+                    log::error!("Failed to get chat info for {}", telegram_chat_id.0)
+                )
+                .await;
+
+                let title = match get_chat_result {
+                    Some(chat) => {
+                        // Bot is a member, continue with the bridging process
+                        chat.title()
+                            .or_else(|| chat.username())
+                            .unwrap_or("unknown chat")
+                            .to_string()
+                    }
+                    None => {
+                        // Bot is not a member of the chat, mark it as not a member in the database
+                        if let Err(e) = db::update_chat_membership(
+                            &self.db,
+                            telegram_chat_id,
+                            "Unknown chat",
+                            false,
+                        )
+                        .await
+                        {
+                            log::error!("Failed to update chat membership: {}", e);
+                        }
+
+                        return match command
+                        .create_response(
+                            &ctx.http,
+                            d::CreateInteractionResponse::Message(
+                                d::CreateInteractionResponseMessage::new()
+                                    .content("The bot is not a member of this Telegram chat. Please add the bot to the chat first.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(_) => (),
+                        Err(e) => log::error!("Failed to respond to command: {}", e),
+                    };
+                    }
+                };
+                match db::set_chat_mapping(command.channel_id, t::ChatId(chat_id), None).await {
+                    Ok(_) => d::CreateInteractionResponseMessage::new().content(format!(
+                        "Successfully bridged Telegram chat \"{title}\" to this channel!"
+                    )),
+                    Err(e) => {
+                        log::error!("Failed to set chat mapping: {}", e);
+                        d::CreateInteractionResponseMessage::new()
+                            .content("Failed to bridge chat. Please try again later.")
+                            .ephemeral(true)
+                    }
+                }
+            }
+            None => d::CreateInteractionResponseMessage::new()
+                .content("Invalid chat selected")
+                .ephemeral(true),
+        };
+
+        if let Err(e) = command
+            .create_response(&ctx.http, d::CreateInteractionResponse::Message(response))
+            .await
+        {
+            log::error!("Failed to respond to command: {}", e);
+        }
+    }
+
+    async fn handle_unbridge_command(&self, ctx: &Context, command: &d::CommandInteraction) {
+        // Check if the channel is currently bridged
+        match db::get_telegram_chat_id(command.channel_id) {
+            Some(_) => {
+                // Remove the bridge mapping
+                match db::remove_chat_mapping(db::RemovalChatId::Discord(command.channel_id)).await
+                {
+                    Ok(_) => {
+                        if let Err(e) = command
+                            .create_response(
+                                &ctx.http,
+                                d::CreateInteractionResponse::Message(
+                                    d::CreateInteractionResponseMessage::new().content(
+                                        "Successfully unbridged this channel from Telegram.",
+                                    ),
+                                ),
+                            )
+                            .await
+                        {
+                            log::error!("Failed to respond to command: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to remove chat mapping: {}", e);
+                        if let Err(e) = command
+                            .create_response(
+                                &ctx.http,
+                                d::CreateInteractionResponse::Message(
+                                    d::CreateInteractionResponseMessage::new()
+                                        .content(
+                                            "Failed to unbridge channel. Please try again later.",
+                                        )
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await
+                        {
+                            log::error!("Failed to respond to command: {}", e);
+                        }
+                    }
+                }
+            }
+            None => {
+                // Channel is not bridged
+                if let Err(e) = command
+                    .create_response(
+                        &ctx.http,
+                        d::CreateInteractionResponse::Message(
+                            d::CreateInteractionResponseMessage::new()
+                                .content(
+                                    "This channel is not currently bridged to any Telegram chat.",
+                                )
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await
+                {
+                    log::error!("Failed to respond to command: {}", e);
+                }
+            }
+        }
+    }
+
+    async fn handle_bridge_autocomplete(
+        &self,
+        ctx: &Context,
+        autocomplete: &d::CommandInteraction,
+    ) {
+        let choices = self
+            .get_available_telegram_chats()
+            .await
+            .into_iter()
+            // .filter(|chat| chat.title.to_lowercase().contains(&input))
+            .take(25)
+            .map(|(id, title)| d::AutocompleteChoice::new(format!("{} ({})", title, id.0), id.0))
+            .collect::<Vec<_>>();
+
+        if let Err(e) = ctx
+            .http
+            .create_interaction_response(
+                autocomplete.id,
+                &autocomplete.token,
+                &d::CreateInteractionResponse::Autocomplete(
+                    d::CreateAutocompleteResponse::new().set_choices(choices),
+                ),
+                vec![],
+            )
+            .await
+        {
+            log::error!("Failed to respond to autocomplete: {}", e);
+        }
     }
 }
 
@@ -763,14 +1028,58 @@ impl d::EventHandler for DiscordState {
         }
     }
 
+    async fn interaction_create(&self, ctx: Context, interaction: d::Interaction) {
+        match interaction {
+            d::Interaction::Command(command) => {
+                if let Some(permissions) = command.channel.as_ref().and_then(|c| c.permissions) {
+                    if !permissions.manage_channels() {
+                        return match command
+                            .create_response(
+                                &ctx.http,
+                                d::CreateInteractionResponse::Message(
+                                    d::CreateInteractionResponseMessage::new()
+                                        .content("You need the 'Manage Channels' permission to use this command.")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await
+                        {
+                            Ok(_) => (),
+                            Err(e) => log::error!("Failed to respond to command: {}", e),
+                        };
+                    }
+                }
+                if command.data.name == "bridge" {
+                    self.handle_bridge_command(&ctx, &command).await;
+                }
+                match command.data.name.as_str() {
+                    "bridge" => self.handle_bridge_command(&ctx, &command).await,
+                    "unbridge" => self.handle_unbridge_command(&ctx, &command).await,
+                    _ => {}
+                }
+            }
+            d::Interaction::Autocomplete(autocomplete) => {
+                if autocomplete.data.name == "bridge" {
+                    self.handle_bridge_autocomplete(&ctx, &autocomplete).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
     // Set a handler to be called on the `ready` event. This is called when a
     // shard is booted, and a READY payload is sent by Discord. This payload
     // contains data like the current user's guild Ids, current user data,
     // private channels, and more.
     //
     // In this case, just print what the current user's username is.
-    async fn ready(&self, _ctx: d::Context, ready: d::Ready) {
+    async fn ready(&self, ctx: d::Context, ready: d::Ready) {
         log::info!("{} is connected!", ready.user.name);
+
+        // Register the bridge command
+        if let Err(e) = self.register_commands(&ctx.http).await {
+            log::error!("Failed to register commands: {}", e);
+        }
     }
 }
 
@@ -1183,6 +1492,25 @@ async fn handle_update(
         log::error!("Got update {upd:?} without a chat");
         return Ok(());
     };
+    let is_member = !matches!(
+        upd.kind,
+        t::UpdateKind::MyChatMember(t::ChatMemberUpdated {
+            new_chat_member: t::ChatMember {
+                kind: t::ChatMemberKind::Banned(_) | t::ChatMemberKind::Left,
+                ..
+            },
+            ..
+        })
+    );
+
+    let title = telegram_chat
+        .title()
+        .or_else(|| telegram_chat.username())
+        .unwrap_or("Unnamed chat")
+        .to_string();
+    if let Err(e) = db::update_chat_membership(&db, telegram_chat.id, &title, is_member).await {
+        log::error!("Failed to update chat membership: {e:?}");
+    }
     let Some((discord_chat, webhook_url)) = db::get_discord_channel_id(telegram_chat.id) else {
         log::info!("Got message {upd:?} in unregistered telegram chat");
         return Ok(());
