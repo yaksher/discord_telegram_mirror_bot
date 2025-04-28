@@ -45,10 +45,14 @@ Note that polls and pins are not forwarded Discord -> Telegram.
 
 Frequently Ask Questions (not really; nobody has asked these but they're questions I ask myself):
 - Q: What the fuck is up with step 3 of the setup instructions?
+  
   A: Webhook messages require a link to the profile picture. I realized later that this can be a special attachment link which refers to one of the attachments on the message, but initially did not realize this; because Telegram does not provide a persistent link for profile pictures (the fetch URL uses the bot's token), I decided to use a Discord channel to host the images. This has the advantage of saving bandwidth for the bot, so I'm not going to change it.
 - Q: Does the bot support Discord <-> Discord, Telegram <-> Telegram, or many-one mappings?
+  
   A: No, and there are no specific plans to support this, because it would be obnoxious. I might though.
 - Q: I want a feature that you don't have, what do I do?
+  
   A: I've supported most things that are relevant to my use-case. Some others are vaguely on the list. You are welcome to either request features or make a pull-request adding support for the feature (or just modify the code, but I'd appreciate if you make a pull-request since you're using my code).
 - Q: Why are there no comments in the code?
+  
   A: Because perfect code is self-documenting. This code is not perfect, but I didn't plan to share it with anyone, and so far, I have had no problems editing it myself despite there being no comments. If you want to make changes, good luck!
