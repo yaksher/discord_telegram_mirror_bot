@@ -300,8 +300,8 @@ async fn load_config() -> Result<()> {
 
     // Load admins
     *ADMINS.write().await = config
-        .get("admins")
-        .and_then(|t| t.get("users"))
+        .get("options")
+        .and_then(|t| t.get("admins"))
         .and_then(|v| v.as_array())
         .unwrap_or(&vec![])
         .into_iter()
@@ -324,9 +324,9 @@ async fn save_config() -> Result<()> {
         mappings.insert(entry.value().0.to_string(), toml::Value::Array(out));
     }
 
-    let mut admins = Table::new();
-    admins.insert(
-        "users".to_string(),
+    let mut options = Table::new();
+    options.insert(
+        "admins".to_string(),
         toml::Value::Array(
             ADMINS
                 .read()
@@ -340,7 +340,7 @@ async fn save_config() -> Result<()> {
     );
     let mut config = Table::new();
     config.insert("chat_mappings".to_string(), toml::Value::Table(mappings));
-    config.insert("admins".to_string(), toml::Value::Table(admins));
+    config.insert("options".to_string(), toml::Value::Table(options));
 
     let toml_string = toml::to_string(&config)?;
     fs::write(CONFIG_FILE, toml_string)?;

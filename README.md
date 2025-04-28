@@ -8,8 +8,8 @@ Setup instructions (do once) (note that building from source is the only "suppor
 - Create a `.env` file and add `DISCORD_TOKEN="<discord bot token>"` and `TELOXIDE_TOKEN="<telegram bot token>"` lines to it. You probably also want `RUST_LOG=info,tracing::span=off,serenity::gateway::shard=off` in there.
 - [Optional] Create a `config.toml` file, then add
   ```
-  [admins]
-  users = [<your discord id>]
+  [options]
+  admins = [<your discord id>]
   ```
   The only this currently affects is that it will enable an autocomplete list when running the `/bridge` command (see below).
 - Run the bot with `cargo run --release`. Alternatively, you can build the bot and put the executable wherever you want, however the `.env` and `config.toml` files should be in whatever the working directory of the bot is. Note that the bot will also maintain a database of message mappings, which'll be created in the same place. The latter option is untested but I don't see why it wouldn't work.
