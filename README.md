@@ -4,6 +4,8 @@ Setup instructions (do once) (note that building from source is the only "suppor
 - Install the Rust compiler.
 - Clone the repo.
 - Modify the `const DISCORD_IMAGE_CHANNEL: d::ChannelId = d::ChannelId::new(1267352463158153216);` line in `main.rs` to be a channel your bot has access to and isn't used for anything else (this'll be made a config parameter at some point).
+
+  (It's not a problem for the bot if it's used it for something else, but the bot will spam it with telegram profile pictures.)
 - Create a Discord bot and a Telegram bot.
 - Create a `.env` file and add `DISCORD_TOKEN="<discord bot token>"` and `TELOXIDE_TOKEN="<telegram bot token>"` lines to it. You probably also want `RUST_LOG=info,tracing::span=off,serenity::gateway::shard=off` in there.
 - [Optional] Create a `config.toml` file, then add
@@ -17,7 +19,11 @@ Setup instructions (do once) (note that building from source is the only "suppor
 Usage instructions (for each pair of channels you want to bridge):
 - Add the Telegram bot to the Telegram channel and the Discord bot to the Discord channel. On the Telegram side, make sure the bot has read messages permission. On the Discord side, make sure the bot has Manage Messages and Manage Webhooks permissions and is added with scopes `bot` and `applications.commands` (the Oauth link should probably look something like `https://discord.com/oauth2/authorize?client_id=<a bunch of numbers>&permissions=536879104&integration_type=0&scope=bot+applications.commands`).
 - Make sure that you have Manage Channel permissions for whatever channel you want to link on Discord.
-- Run `/bridge chat: [telegram chat id]` in the Discord channel you want to link. If you did the optional `admins` step, there will be an autocomplete listing all telegram channels the bot is in (or well, a best-effort guess; if no messages have been sent since the bot was added, it might not be listed, and if the bot was removed, it'll still be listed (to remove a channel that the bot was removed from from the autocomplete list, simply attempt to bridge to it; the command will fail and the channel will not be listed again)). Otherwise, you'll have to find the chat id of the Telegram chat some other way. Note that _anyone can add mappings_ as long as they have the appropriate Discord permissions. The `admins` list only controls who sees autocomplete. Correspondingly, if someone gets the add link for your Discord bot and adds it somewhere, finds the @ handle for your Telegram bot and adds that somewhere, they will be able to use your hosting of the bot. This is arguably a denial of service vulnerability probably, but I don't really care. If this bothers you, you can add `if !db::admins().await.contains(&command.user.id) { return; }` to the beginning of `handle_bridge_command` in `main.rs` or whatever.
+- Run `/bridge chat: [telegram chat id]` in the Discord channel you want to link. 
+
+  If you did the optional `admins` step, there will be an autocomplete listing all unmapped telegram channels the bot is in (or well, a best-effort guess; if no messages have been sent since the bot was added, it might not be listed, and if the bot was removed, it'll still be listed (to remove a channel that the bot was removed from from the autocomplete list, simply attempt to bridge to it; the command will fail and the channel will not be listed again)). 
+  
+  Otherwise, you'll have to find the chat id of the Telegram chat some other way. Note that _anyone can add mappings_ as long as they have the appropriate Discord permissions. The `admins` list only controls who sees autocomplete. Correspondingly, if someone gets the add link for your Discord bot and adds it somewhere, finds the @ handle for your Telegram bot and adds that somewhere, they will be able to use your hosting of the bot. This is arguably a denial of service vulnerability probably, but I don't really care. If this bothers you, you can add `if !db::admins().await.contains(&command.user.id) { return; }` to the beginning of `handle_bridge_command` in `main.rs` or whatever.
 - To remove a bridge, run `/unbridge` on the Discord side.
 
 Please note that the features may not be up to date because I may add things and forget to update it. Also the list may not be exhaustive because it was written off the top of my head.
@@ -43,7 +49,7 @@ Features (Discord -> Telegram):
 
 Note that polls and pins are not forwarded Discord -> Telegram.
 
-Frequently Ask Questions (not really; nobody has asked these but they're questions I ask myself):
+Frequently Asked Questions (nobody has asked these but they're questions I ask myself or hypothesize someone might want to ask):
 - Q: What the fuck is up with step 3 of the setup instructions?
   
   A: Webhook messages require a link to the profile picture. I realized later that this can be a special attachment link which refers to one of the attachments on the message, but initially did not realize this; because Telegram does not provide a persistent link for profile pictures (the fetch URL uses the bot's token), I decided to use a Discord channel to host the images. This has the advantage of saving bandwidth for the bot, so I'm not going to change it.
@@ -52,7 +58,11 @@ Frequently Ask Questions (not really; nobody has asked these but they're questio
   A: No, and there are no specific plans to support this, because it would be obnoxious. I might though.
 - Q: I want a feature that you don't have, what do I do?
   
-  A: I've supported most things that are relevant to my use-case. Some others are vaguely on the list. You are welcome to either request features or make a pull-request adding support for the feature (or just modify the code, but I'd appreciate if you make a pull-request since you're using my code).
+  A: I've supported most things that are relevant to my use-case. Some others are vaguely on the list. You are welcome to either request features or make a pull-request adding support for the feature.
 - Q: Why are there no comments in the code?
   
   A: Because perfect code is self-documenting. This code is not perfect, but I didn't plan to share it with anyone, and so far, I have had no problems editing it myself despite there being no comments. If you want to make changes, good luck!
+
+- Q: Why are there _a few_ comments in the code?
+
+  A: Claude likes to write inane comments, some of which I kept. A few of the comments are from copy-pasting example code.
