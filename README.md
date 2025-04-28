@@ -1,6 +1,6 @@
 A bot for mirroring Discord and Telegram channels.
 
-Setup instructions (do once) (note that building from source is the only supported path):
+Setup instructions (do once) (note that building from source is the only "supported" path (I do not support anything, but at least you have the source code; I am not providing any executables)):
 - Install the Rust compiler.
 - Clone the repo.
 - Modify the `const DISCORD_IMAGE_CHANNEL: d::ChannelId = d::ChannelId::new(1267352463158153216);` line in `main.rs` to be a channel your bot has access to and isn't used for anything else (this'll be made a config parameter at some point).
