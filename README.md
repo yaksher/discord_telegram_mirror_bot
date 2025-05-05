@@ -3,17 +3,17 @@ A bot for mirroring Discord and Telegram channels.
 Setup instructions (do once) (note that building from source is the only "supported" path (I do not support anything, but at least you have the source code; I am not providing any executables)):
 - Install the Rust compiler.
 - Clone the repo.
-- Modify the `const DISCORD_IMAGE_CHANNEL: d::ChannelId = d::ChannelId::new(1267352463158153216);` line in `main.rs` to be a channel your bot has access to and isn't used for anything else (this'll be made a config parameter at some point).
-
-  (It's not a problem for the bot if it's used it for something else, but the bot will spam it with telegram profile pictures.)
 - Create a Discord bot and a Telegram bot.
 - Create a `.env` file and add `DISCORD_TOKEN="<discord bot token>"` and `TELOXIDE_TOKEN="<telegram bot token>"` lines to it. You probably also want `RUST_LOG=info,tracing::span=off,serenity::gateway::shard=off` in there.
-- [Optional] Create a `config.toml` file, then add
+- Create a `config.toml` file, then add
   ```
   [options]
   admins = [<your discord id>]
+  image_channel = <channel_id>
   ```
-  The only this currently affects is that it will enable an autocomplete list when running the `/bridge` command (see below).
+  The admins field is [optional] and only currently enables an autocomplete list when running the `/bridge` command (see below). The image_channel is needed for profile pictures in telegram->discord to work. The <channel_id> should be a channel your bot has access to and isn't used for anything else.
+
+  (It's not a problem for the bot if it's used it for something else, but the bot will spam it with telegram profile pictures.)
 - Run the bot with `cargo run --release`. Alternatively, you can build the bot and put the executable wherever you want, however the `.env` and `config.toml` files should be in whatever the working directory of the bot is. Note that the bot will also maintain a database of message mappings, which'll be created in the same place. The latter option is untested but I don't see why it wouldn't work.
 
 Usage instructions (for each pair of channels you want to bridge):

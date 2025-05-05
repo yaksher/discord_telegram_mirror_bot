@@ -13,6 +13,7 @@ lazy_static! {
     static ref TELEGRAM_TO_DISCORD_CACHE: DashMap<t::ChatId, (d::ChannelId, Option<String>)> =
         DashMap::new();
     static ref ADMINS: tokio::sync::RwLock<Vec<d::UserId>> = vec![].into();
+    static ref DISCORD_IMAGE_CHANNEL: tokio::sync::RwLock<Option<d::ChannelId>> = None.into();
 }
 
 const CONFIG_FILE: &str = "config.toml";
@@ -310,6 +311,13 @@ async fn load_config() -> Result<()> {
         .map(Into::into)
         .collect();
 
+    *DISCORD_IMAGE_CHANNEL.write().await = config
+        .get("options")
+        .and_then(|t| t.get("image_channel"))
+        .and_then(|v| v.as_integer())
+        .map(|i| i as u64)
+        .map(Into::into);
+
     Ok(())
 }
 
@@ -338,6 +346,12 @@ async fn save_config() -> Result<()> {
                 .collect(),
         ),
     );
+    if let Some(image_channel) = &*DISCORD_IMAGE_CHANNEL.read().await {
+        options.insert(
+            "image_channel".to_string(),
+            toml::Value::Integer(u64::from(*image_channel) as i64),
+        );
+    }
     let mut config = Table::new();
     config.insert("chat_mappings".to_string(), toml::Value::Table(mappings));
     config.insert("options".to_string(), toml::Value::Table(options));
@@ -382,6 +396,10 @@ pub async fn remove_chat_mapping(id: RemovalChatId) -> Result<()> {
 
 pub async fn admins() -> Vec<d::UserId> {
     ADMINS.read().await.clone()
+}
+
+pub async fn discord_image_channel() -> Option<d::ChannelId> {
+    (&*DISCORD_IMAGE_CHANNEL.read().await).as_ref().copied()
 }
 
 pub fn get_telegram_chat_id(discord_channel_id: d::ChannelId) -> Option<t::ChatId> {

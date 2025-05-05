@@ -60,8 +60,6 @@ use discord as d;
 use telegram as t;
 
 const DISCORD_TOKEN_ENV: &str = "DISCORD_TOKEN";
-const DISCORD_IMAGE_CHANNEL: d::ChannelId = d::ChannelId::new(1267352463158153216);
-
 struct DiscordState {
     telegram_bot: t::Bot,
     db: SqlitePool,
@@ -1201,8 +1199,9 @@ async fn telegram_avatar_url_by_id(
 
     let files = vec![d::CreateAttachment::bytes(buf, "avatar.jpg")];
     let builder = d::CreateMessage::new().add_files(files.clone());
+    let discord_image_channel = db::discord_image_channel().await?;
     let message = discord_request!(
-        DISCORD_IMAGE_CHANNEL.send_message(discord_http.as_ref(), builder.clone())
+        discord_image_channel.send_message(discord_http.as_ref(), builder.clone())
     )
     .await?;
     let url: Arc<str> = message
