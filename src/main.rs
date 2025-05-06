@@ -15,32 +15,28 @@ mod telegram {
     pub use teloxide::types::*;
 }
 
-use teloxide::{net::Download, prelude::*};
+use teloxide::{net::Download as _, prelude::*};
 use url::Url;
 
 use dotenv;
 
 #[allow(unused_imports)]
 mod discord {
-    pub use serenity::builder::{
-        AutocompleteChoice, CreateAutocompleteResponse, CreateCommand, CreateCommandOption,
-        CreateInteractionResponse, CreateInteractionResponseMessage,
-    };
-    // pub use serenity::model::application::interaction::InteractionResponseType;
-    pub use serenity::model::application::{
-        Command, CommandInteraction, CommandOptionType, Interaction,
-    };
     pub use serenity::{
-        all::{content_safe, ContentSafeOptions, UserId},
+        all::{content_safe, ContentSafeOptions, Permissions, UserId},
         async_trait,
         builder::{
-            CreateAllowedMentions, CreateAttachment, CreateEmbed, CreateEmbedAuthor, CreateMessage,
-            CreateWebhook, EditMessage, EditWebhookMessage, ExecuteWebhook,
+            AutocompleteChoice, CreateAllowedMentions, CreateAttachment,
+            CreateAutocompleteResponse, CreateChannel, CreateCommand, CreateCommandOption,
+            CreateEmbed, CreateEmbedAuthor, CreateInteractionResponse,
+            CreateInteractionResponseMessage, CreateMessage, CreateWebhook, EditMessage,
+            EditWebhookMessage, ExecuteWebhook,
         },
         cache::Cache,
         http::Http,
         model::{
-            channel::{Attachment, Message, Reaction, ReactionType},
+            application::{Command, CommandInteraction, CommandOptionType, Interaction},
+            channel::{Attachment, ChannelType, Message, Reaction, ReactionType},
             event::MessageUpdateEvent,
             gateway::Ready,
             id::{ChannelId, GuildId, MessageId},
@@ -51,10 +47,7 @@ mod discord {
         Error,
     };
 }
-use serenity::{
-    all::{ContentSafeOptions, Permissions},
-    prelude::*,
-};
+use serenity::prelude::Mentionable as _;
 
 use discord as d;
 use telegram as t;
@@ -409,7 +402,7 @@ impl DiscordState {
             http,
             d::CreateCommand::new("bridge")
                 .description("Bridge a Telegram chat to this Discord channel")
-                .default_member_permissions(Permissions::MANAGE_CHANNELS)
+                .default_member_permissions(d::Permissions::MANAGE_CHANNELS)
                 .add_option(
                     d::CreateCommandOption::new(
                         d::CommandOptionType::Integer,
@@ -425,203 +418,158 @@ impl DiscordState {
             http,
             d::CreateCommand::new("unbridge")
                 .description("Remove the Telegram chat bridge in this Discord channel")
-                .default_member_permissions(Permissions::MANAGE_CHANNELS),
+                .default_member_permissions(d::Permissions::MANAGE_CHANNELS),
         ))
         .await;
         Ok(())
     }
 
-    async fn handle_bridge_command(&self, ctx: &Context, command: &d::CommandInteraction) {
-        let chat_id = command
-            .data
-            .options
-            .get(0)
-            .and_then(|opt| opt.value.as_i64());
-
-        if let Some(existing_telegram_channel) = db::get_telegram_chat_id(command.channel_id) {
-            let reply = command
-                .create_response(
+    async fn handle_bridge_command(&self, ctx: &d::Context, command: &d::CommandInteraction) {
+        macro_rules! reply {
+            (internal: $r:expr, $ephem:expr) => {{
+                let r = $r;
+                let t: &str = r.as_ref();
+                discord_request!(command.create_response(
                     &ctx.http,
                     d::CreateInteractionResponse::Message(
                         d::CreateInteractionResponseMessage::new()
-                            .content(format!(
-                                "This Discord channel is already bridged to a Telegram chat: <#{}>.\nUse /unbridge to remove that bridge.",
-                                existing_telegram_channel
-                            ))
-                            .ephemeral(true),
+                            .content(t)
+                            .ephemeral($ephem),
                     ),
-                )
+                ))
                 .await;
-            let out = match reply {
-                Ok(_) => (),
-                Err(e) => log::error!("Failed to respond to command: {}", e),
+            }};
+            ($r:expr $(,)?) => {reply!(internal: $r, false)};
+            (ephemeral: $r:expr $(,)?) => {
+                reply!(internal: $r, true)
             };
-            return out;
         }
 
-        let response = match chat_id {
-            Some(chat_id) => {
-                let telegram_chat_id = t::ChatId(chat_id);
+        if let Some(existing_telegram_channel) = db::get_telegram_chat_id(command.channel_id) {
+            reply!(ephemeral: format!(
+                "This Discord channel is already bridged to a Telegram chat: <#{}>.\nUse /unbridge to remove that bridge.",
+                existing_telegram_channel
+            ));
+            return;
+        }
 
-                // Check if this Telegram chat is already mapped to a Discord channel
-                if let Some((existing_discord_channel, _)) =
-                    db::get_discord_channel_id(telegram_chat_id)
-                {
-                    let reply = command
-                        .create_response(
-                            &ctx.http,
-                            d::CreateInteractionResponse::Message(
-                                d::CreateInteractionResponseMessage::new()
-                                    .content(format!(
-                                        "This Telegram chat is already bridged to another Discord channel: <#{}>",
-                                        existing_discord_channel
-                                    ))
-                                    .ephemeral(true),
-                            ),
-                        )
-                        .await;
-                    let out = match reply {
-                        Ok(_) => (),
-                        Err(e) => log::error!("Failed to respond to command: {}", e),
-                    };
-                    return out;
-                }
-
-                // Verify that the bot is a member of the chat by trying to get chat info
-                let get_chat_result = telegram_request!(
-                    self.telegram_bot.get_chat(telegram_chat_id),
-                    log::error!("Failed to get chat info for {}", telegram_chat_id.0)
-                )
-                .await;
-
-                let title = match get_chat_result {
-                    Some(chat) => {
-                        // Bot is a member, continue with the bridging process
-                        chat.title()
-                            .or_else(|| chat.username())
-                            .unwrap_or("unknown chat")
-                            .to_string()
-                    }
-                    None => {
-                        // Bot is not a member of the chat, mark it as not a member in the database
-                        if let Err(e) = db::update_chat_membership(
-                            &self.db,
-                            telegram_chat_id,
-                            "Unknown chat",
-                            false,
-                        )
-                        .await
-                        {
-                            log::error!("Failed to update chat membership: {}", e);
-                        }
-
-                        return match command
-                        .create_response(
-                            &ctx.http,
-                            d::CreateInteractionResponse::Message(
-                                d::CreateInteractionResponseMessage::new()
-                                    .content("The bot is not a member of this Telegram chat. Please add the bot to the chat first.")
-                                    .ephemeral(true),
-                            ),
-                        )
-                        .await
-                    {
-                        Ok(_) => (),
-                        Err(e) => log::error!("Failed to respond to command: {}", e),
-                    };
-                    }
-                };
-                match db::set_chat_mapping(command.channel_id, t::ChatId(chat_id), None).await {
-                    Ok(_) => d::CreateInteractionResponseMessage::new().content(format!(
-                        "Successfully bridged Telegram chat \"{title}\" to this channel!"
-                    )),
-                    Err(e) => {
-                        log::error!("Failed to set chat mapping: {}", e);
-                        d::CreateInteractionResponseMessage::new()
-                            .content("Failed to bridge chat. Please try again later.")
-                            .ephemeral(true)
-                    }
-                }
-            }
-            None => d::CreateInteractionResponseMessage::new()
-                .content("Invalid chat selected")
-                .ephemeral(true),
+        let Some(chat_id) = command
+            .data
+            .options
+            .get(0)
+            .and_then(|opt| opt.value.as_i64())
+        else {
+            reply!(ephemeral: "Invalid chat selected.");
+            return;
         };
 
-        if let Err(e) = command
-            .create_response(&ctx.http, d::CreateInteractionResponse::Message(response))
-            .await
-        {
-            log::error!("Failed to respond to command: {}", e);
+        let telegram_chat_id = t::ChatId(chat_id);
+
+        // Check if this Telegram chat is already mapped to a Discord channel
+        if let Some((existing_discord_channel, _)) = db::get_discord_channel_id(telegram_chat_id) {
+            reply!(ephemeral: format!(
+                "This Telegram chat is already bridged to another Discord channel: <#{}>",
+                existing_discord_channel
+            ));
+            return;
         }
+
+        // Verify that the bot is a member of the chat by trying to get chat info
+        let get_chat_result = telegram_request!(
+            self.telegram_bot.get_chat(telegram_chat_id),
+            log::error!("Failed to get chat info for {}", telegram_chat_id.0)
+        )
+        .await;
+
+        let Some(chat) = get_chat_result else {
+            // Bot is not a member of the chat, mark it as not a member in the database
+            if let Err(e) =
+                db::update_chat_membership(&self.db, telegram_chat_id, "Unknown chat", false).await
+            {
+                log::error!("Failed to update chat membership: {}", e);
+            }
+            reply!(ephemeral: "The bot is not a member of this Telegram chat. Please add the bot to the chat first.");
+            return;
+        };
+        let title = chat
+            .title()
+            .or_else(|| chat.username())
+            .unwrap_or("unknown chat")
+            .to_string();
+        match db::set_chat_mapping(command.channel_id, t::ChatId(chat_id), None).await {
+            Ok(()) => reply!(format!(
+                "Successfully bridged Telegram chat \"{title}\" to this channel!"
+            )),
+            Err(e) => {
+                log::error!("Failed to set chat mapping: {}", e);
+                reply!(ephemeral: "Failed to bridge chat. Please try again later.");
+                return;
+            }
+        }
+
+        let telegram_notification = self.telegram_bot.send_message(
+            telegram_chat_id,
+            format!(
+                "A bridge has been created to the Discord channel \"{}\".",
+                command
+                    .channel
+                    .as_ref()
+                    .and_then(|c| c.name.as_deref())
+                    .unwrap_or("[name unknown]")
+            ),
+        );
+        telegram_request!(telegram_notification.send_ref()).await;
     }
 
-    async fn handle_unbridge_command(&self, ctx: &Context, command: &d::CommandInteraction) {
+    async fn handle_unbridge_command(&self, ctx: &d::Context, command: &d::CommandInteraction) {
+        macro_rules! reply {
+            (internal: $r:expr, $ephem:expr) => {{
+                let r = $r;
+                let t: &str = r.as_ref();
+                discord_request!(command.create_response(
+                    &ctx.http,
+                    d::CreateInteractionResponse::Message(
+                        d::CreateInteractionResponseMessage::new()
+                            .content(t)
+                            .ephemeral($ephem),
+                    ),
+                ))
+                .await;
+            }};
+            ($r:expr $(,)?) => {reply!(internal: $r, false)};
+            (ephemeral: $r:expr $(,)?) => {
+                reply!(internal: $r, true)
+            };
+        }
         // Check if the channel is currently bridged
         match db::get_telegram_chat_id(command.channel_id) {
-            Some(_) => {
+            Some(telegram_chat_id) => {
                 // Remove the bridge mapping
                 match db::remove_chat_mapping(db::RemovalChatId::Discord(command.channel_id)).await
                 {
                     Ok(_) => {
-                        if let Err(e) = command
-                            .create_response(
-                                &ctx.http,
-                                d::CreateInteractionResponse::Message(
-                                    d::CreateInteractionResponseMessage::new().content(
-                                        "Successfully unbridged this channel from Telegram.",
-                                    ),
-                                ),
-                            )
-                            .await
-                        {
-                            log::error!("Failed to respond to command: {}", e);
-                        }
+                        reply!("Successfully unbridged this channel from Telegram.");
+                        let telegram_notification = self.telegram_bot.send_message(
+                            telegram_chat_id,
+                            "The bridge to this channel has been removed.",
+                        );
+                        telegram_request!(telegram_notification.send_ref()).await;
                     }
                     Err(e) => {
                         log::error!("Failed to remove chat mapping: {}", e);
-                        if let Err(e) = command
-                            .create_response(
-                                &ctx.http,
-                                d::CreateInteractionResponse::Message(
-                                    d::CreateInteractionResponseMessage::new()
-                                        .content(
-                                            "Failed to unbridge channel. Please try again later.",
-                                        )
-                                        .ephemeral(true),
-                                ),
-                            )
-                            .await
-                        {
-                            log::error!("Failed to respond to command: {}", e);
-                        }
+                        reply!(ephemeral: "Failed to unbridge channel. Please try again later.");
                     }
                 }
             }
             None => {
-                // Channel is not bridged
-                if let Err(e) = command
-                    .create_response(
-                        &ctx.http,
-                        d::CreateInteractionResponse::Message(
-                            d::CreateInteractionResponseMessage::new()
-                                .content(
-                                    "This channel is not currently bridged to any Telegram chat.",
-                                )
-                                .ephemeral(true),
-                        ),
-                    )
-                    .await
-                {
-                    log::error!("Failed to respond to command: {}", e);
-                }
+                reply!(ephemeral: "This channel is not currently bridged to any Telegram chat.")
             }
         }
     }
 
     async fn handle_bridge_autocomplete(
         &self,
-        ctx: &Context,
+        ctx: &d::Context,
         autocomplete: &d::CommandInteraction,
     ) {
         let choices = if db::admins().await.contains(&autocomplete.user.id) {
@@ -754,8 +702,12 @@ impl d::EventHandler for DiscordState {
                 .into_iter()
                 .next()
                 .expect("length > 0");
-            let content =
-                d::content_safe(&ctx, snapshot.content, &ContentSafeOptions::default(), &[]);
+            let content = d::content_safe(
+                &ctx,
+                snapshot.content,
+                &d::ContentSafeOptions::default(),
+                &[],
+            );
             let content = format::discord_to_telegram_format(&content);
 
             let text = format!("<b>{author}</b> (forwarded)\n{content}");
@@ -1031,7 +983,7 @@ impl d::EventHandler for DiscordState {
         }
     }
 
-    async fn interaction_create(&self, ctx: Context, interaction: d::Interaction) {
+    async fn interaction_create(&self, ctx: d::Context, interaction: d::Interaction) {
         match interaction {
             d::Interaction::Command(command) => {
                 if let Some(permissions) = command.channel.as_ref().and_then(|c| c.permissions) {
@@ -1478,6 +1430,84 @@ async fn send_poll(
     discord_result
 }
 
+async fn handle_telegram_bridge_command(bot: t::Bot, http: Arc<d::Http>, msg: &t::Message) {
+    let Some(target) = msg
+        .text()
+        .and_then(|s| s.strip_prefix("/bridge "))
+        .map(str::trim)
+    else {
+        return;
+    };
+    macro_rules! reply {
+        ($err:expr $(,)?) => {{
+            let err = bot
+                .send_message(msg.chat.id, $err)
+                .parse_mode(t::ParseMode::Html)
+                .reply_parameters(t::ReplyParameters::new(msg.id));
+            let _ = telegram_request!(err.send_ref()).await;
+        }};
+    }
+    if target.contains(char::is_whitespace) || target == "" {
+        reply!(
+            "Usage: <code>/bridge &lthub name&gt</code> \
+            where <code>&lthub name&gt</code> contains no whitespace"
+        );
+        return;
+    }
+    let Some(hub) = db::get_hub_server(target).await else {
+        reply!(format!("No hub found matching \"{target}\""));
+        return;
+    };
+    let chat_name = msg
+        .chat
+        .title()
+        .or_else(|| msg.chat.username())
+        .unwrap_or("unknown chat name");
+    let mut create_channel = d::CreateChannel::new(chat_name).kind(d::ChannelType::Text);
+    let channel = match hub {
+        db::Hub::Server(g) => {
+            discord_request!(g.create_channel(&http, create_channel.clone())).await
+        }
+        db::Hub::Category(g, c) => {
+            create_channel = create_channel.category(c);
+            discord_request!(g.create_channel(&http, create_channel.clone())).await
+        }
+    };
+    let Some(ch) = channel else {
+        reply!(
+            "Could not create channel. \
+            Ensure that bot has required Discord permissions in the hub \
+            and hub category exists or try again later."
+        );
+        return;
+    };
+    if let Err(e) = db::set_chat_mapping(ch.id, msg.chat.id, None).await {
+        log::error!(
+            "Failed to set mapping for created channel: {e}. Attempting to delete channel."
+        );
+        if let Some(_) = discord_request!(ch.delete(&http)).await {
+            log::warn!("Successfully deleted created channel.");
+            reply!("An internal error occurred. Try again later.");
+            return;
+        } else {
+            log::error!("Could not delete created channel.");
+            let explanation = d::CreateMessage::new().content(
+                "[Hub]: Someone attempted to bridge to this hub, \
+                but an internal error occurred and then this channel could not be deleted. \
+                This channel can be safely deleted.",
+            );
+            let _ = discord_request!(ch.send_message(&http, explanation.clone())).await;
+            reply!("The Discord channel was created but a bridge could not be made due to an internal error.");
+            return;
+        }
+    }
+    reply!("Successfully created and linked channel.");
+    let explanation = d::CreateMessage::new().content(format!(
+        "[Hub]: Someone bridged the telegram channel \"{chat_name}\" to this hub."
+    ));
+    let _ = discord_request!(ch.send_message(&http, explanation.clone())).await;
+}
+
 async fn handle_update(
     bot: t::Bot,
     me: t::Me,
@@ -1514,6 +1544,14 @@ async fn handle_update(
         .to_string();
     if let Err(e) = db::update_chat_membership(&db, telegram_chat.id, &title, is_member).await {
         log::error!("Failed to update chat membership: {e:?}");
+    }
+    if let t::UpdateKind::Message(msg) = &upd.kind {
+        if let Some(text) = msg.text() {
+            if text.starts_with("/bridge") {
+                handle_telegram_bridge_command(bot, discord_http, msg).await;
+                return Ok(());
+            }
+        }
     }
     let Some((discord_chat, webhook_url)) = db::get_discord_channel_id(telegram_chat.id) else {
         log::info!("Got message {upd:?} in unregistered telegram chat");
@@ -2009,12 +2047,12 @@ async fn main() {
     // Configure the client with your Discord bot token in the environment.
     let discord_token = env::var(DISCORD_TOKEN_ENV).expect("Expected a token in the environment");
     // Set gateway intents, which decides what events the bot will be notified about
-    let intents = GatewayIntents::all();
+    let intents = d::GatewayIntents::all();
 
     // Create a new instance of the Client, logging in as a bot. This will
     // automatically prepend your bot token with "Bot ", which is a requirement
     // by Discord for bot users.
-    let mut discord_client = Client::builder(&discord_token, intents)
+    let mut discord_client = d::Client::builder(&discord_token, intents)
         .event_handler(DiscordState {
             telegram_bot: telegram_bot.clone(),
             db: db_pool.clone(),
@@ -2032,8 +2070,8 @@ async fn main() {
 
     let telegram_handler = t::dptree::endpoint(handle_update);
 
-    let mut telegram_dispatch = Dispatcher::builder(telegram_bot, telegram_handler)
-        .dependencies(dptree::deps![
+    let mut telegram_dispatch = t::Dispatcher::builder(telegram_bot, telegram_handler)
+        .dependencies(t::dptree::deps![
             webhook_cache,
             avatar_cache,
             discord_cache,
