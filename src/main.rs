@@ -1675,11 +1675,14 @@ async fn handle_telegram_bridge_command(bot: t::Bot, http: Arc<d::Http>, msg: &t
         reply!(format!("No hub found matching \"{target}\""));
         return;
     };
-    let chat_name = msg
+    let mut chat_name = msg
         .chat
         .title()
         .or_else(|| msg.chat.username())
         .unwrap_or("unknown chat name");
+    if chat_name.len() > 100 {
+        chat_name = &chat_name[..100];
+    }
     let create_channel = d::CreateChannel::new(chat_name).kind(d::ChannelType::Text);
     let channel = match hub {
         db::Hub::Server(g) => {
