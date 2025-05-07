@@ -37,7 +37,9 @@ mod discord {
         cache::Cache,
         http::Http,
         model::{
-            application::{Command, CommandInteraction, CommandOptionType, Interaction},
+            application::{
+                Command, CommandInteraction, CommandOptionType, Interaction, InteractionContext,
+            },
             channel::{Attachment, ChannelType, Message, Reaction, ReactionType},
             event::MessageUpdateEvent,
             gateway::Ready,
@@ -444,7 +446,9 @@ impl DiscordState {
                     )
                     .required(false)
                     .set_autocomplete(true)
-                ),
+                    .channel_types(vec![d::ChannelType::Category])
+                )
+                .add_context(d::InteractionContext::Guild),
         ))
         .await;
         discord_request!(d::Command::create_global_command(
@@ -460,7 +464,7 @@ impl DiscordState {
                     )
                     .required(true)
                     .set_autocomplete(true),
-                ),
+                ).add_context(d::InteractionContext::Guild),
         ))
         .await;
         discord_request!(d::Command::create_global_command(
@@ -1676,14 +1680,13 @@ async fn handle_telegram_bridge_command(bot: t::Bot, http: Arc<d::Http>, msg: &t
         .title()
         .or_else(|| msg.chat.username())
         .unwrap_or("unknown chat name");
-    let mut create_channel = d::CreateChannel::new(chat_name).kind(d::ChannelType::Text);
+    let create_channel = d::CreateChannel::new(chat_name).kind(d::ChannelType::Text);
     let channel = match hub {
         db::Hub::Server(g) => {
             discord_request!(g.create_channel(&http, create_channel.clone())).await
         }
         db::Hub::Category(g, c) => {
-            create_channel = create_channel.category(c);
-            discord_request!(g.create_channel(&http, create_channel.clone())).await
+            discord_request!(g.create_channel(&http, create_channel.clone().category(c))).await
         }
     };
     let Some(ch) = channel else {
