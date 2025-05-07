@@ -24,7 +24,8 @@ Usage instructions (for each pair of channels you want to bridge):
   If you did the optional `admins` step, there will be an autocomplete listing all unmapped telegram channels the bot is in (or well, a best-effort guess; if no messages have been sent since the bot was added, it might not be listed, and if the bot was removed, it'll still be listed (to remove a channel that the bot was removed from from the autocomplete list, simply attempt to bridge to it; the command will fail and the channel will not be listed again)). 
   
   Otherwise, you'll have to find the chat id of the Telegram chat some other way. Note that _anyone can add mappings_ as long as they have the appropriate Discord permissions. The `admins` list only controls who sees autocomplete. Correspondingly, if someone gets the add link for your Discord bot and adds it somewhere, finds the @ handle for your Telegram bot and adds that somewhere, they will be able to use your hosting of the bot. This is arguably a denial of service vulnerability probably, but I don't really care. If this bothers you, you can add `if !db::admins().await.contains(&command.user.id) { return; }` to the beginning of `handle_bridge_command` in `main.rs` or whatever.
-- To remove a bridge, run `/unbridge` on the Discord side.
+- To remove a bridge, run `/unbridge` on the Discord or Telegram side.
+- You can also mark a Discord server or category as a named "hub." Any admin knowing the name can then run `/bridge <hub name>` in a Telegram channel with the bot to create a channel in the server/category linked to the Telegram channel from which the command was run. (There is currently no support for linking to an existing channel from Telegram.) See the `/hub`, `/unhub`, and `/hubinfo` commands on Discord.
 
 Please note that the features may not be up to date because I may add things and forget to update it. Also the list may not be exhaustive because it was written off the top of my head.
 
