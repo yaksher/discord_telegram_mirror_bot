@@ -13,6 +13,14 @@ pub enum Hub {
     Server(d::GuildId),
     Category(d::GuildId, d::ChannelId),
 }
+impl Hub {
+    fn guild(&self) -> d::GuildId {
+        match *self {
+            Self::Category(g, _) => g,
+            Self::Server(g) => g,
+        }
+    }
+}
 
 lazy_static! {
     static ref DISCORD_TO_TELEGRAM_CACHE: DashMap<d::ChannelId, t::ChatId> = DashMap::new();
@@ -407,10 +415,30 @@ pub async fn get_hub_server(name: &str) -> Option<Hub> {
     HUBS.get(name).as_deref().copied()
 }
 
-pub async fn set_hub_server(name: String, hub: Hub) -> Result<()> {
-    HUBS.insert(name, hub);
+pub async fn add_hub_server(name: String, hub: Hub) -> Result<bool> {
+    let entry = HUBS.entry(name);
+    if matches!(entry, dashmap::Entry::Occupied(_)) {
+        return Ok(false);
+    }
+    entry.insert(hub);
 
-    save_config().await
+    save_config().await?;
+    Ok(true)
+}
+
+pub async fn remove_hub_server(name: &str, guild_id: d::GuildId) -> Result<Option<Hub>> {
+    let removed = HUBS
+        .remove_if(name, |_, hub| hub.guild() == guild_id)
+        .map(|e| e.1);
+
+    save_config().await?;
+    return Ok(removed);
+}
+
+pub fn hubs_for_server(guild_id: d::GuildId) -> Vec<(String, Hub)> {
+    HUBS.iter()
+        .filter_map(|e| (e.value().guild() == guild_id).then(|| (e.key().to_string(), *e.value())))
+        .collect()
 }
 
 pub async fn set_chat_mapping(

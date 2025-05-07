@@ -23,7 +23,9 @@ use dotenv;
 #[allow(unused_imports)]
 mod discord {
     pub use serenity::{
-        all::{content_safe, ContentSafeOptions, Permissions, UserId},
+        all::{
+            content_safe, ContentSafeOptions, Permissions, ResolvedOption, ResolvedValue, UserId,
+        },
         async_trait,
         builder::{
             AutocompleteChoice, CreateAllowedMentions, CreateAttachment,
@@ -401,13 +403,13 @@ impl DiscordState {
         discord_request!(d::Command::create_global_command(
             http,
             d::CreateCommand::new("bridge")
-                .description("Bridge a Telegram chat to this Discord channel")
+                .description("Bridge a Telegram chat to this Discord channel.")
                 .default_member_permissions(d::Permissions::MANAGE_CHANNELS)
                 .add_option(
                     d::CreateCommandOption::new(
                         d::CommandOptionType::Integer,
                         "chat",
-                        "The Telegram chat to bridge",
+                        "The Telegram chat to bridge.",
                     )
                     .required(true)
                     .set_autocomplete(true),
@@ -417,8 +419,53 @@ impl DiscordState {
         discord_request!(d::Command::create_global_command(
             http,
             d::CreateCommand::new("unbridge")
-                .description("Remove the Telegram chat bridge in this Discord channel")
+                .description("Remove the Telegram chat bridge in this Discord channel.")
                 .default_member_permissions(d::Permissions::MANAGE_CHANNELS),
+        ))
+        .await;
+        discord_request!(d::Command::create_global_command(
+            http,
+            d::CreateCommand::new("hub")
+                .description("Make a category into a named hub. WARNING: See `/hubinfo`.")
+                .default_member_permissions(d::Permissions::MANAGE_CHANNELS)
+                .add_option(
+                    d::CreateCommandOption::new(
+                        d::CommandOptionType::String,
+                        "hub_name",
+                        "The name of the hub. It should not contain any whitespace.",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    d::CreateCommandOption::new(
+                        d::CommandOptionType::Channel,
+                        "hub_category",
+                        "Category for hub channels. Omit to make channels uncategorized."
+                    )
+                    .required(false)
+                    .set_autocomplete(true)
+                ),
+        ))
+        .await;
+        discord_request!(d::Command::create_global_command(
+            http,
+            d::CreateCommand::new("unhub")
+                .description("Remove hub status from the server or a category in it. This will not remove any bridges.")
+                .default_member_permissions(d::Permissions::MANAGE_CHANNELS)
+                .add_option(
+                    d::CreateCommandOption::new(
+                        d::CommandOptionType::String,
+                        "hub_name",
+                        "The name of the hub to remove.",
+                    )
+                    .required(true)
+                    .set_autocomplete(true),
+                ),
+        ))
+        .await;
+        discord_request!(d::Command::create_global_command(
+            http,
+            d::CreateCommand::new("hubinfo").description("Provides info about the hub feature."),
         ))
         .await;
         Ok(())
@@ -542,31 +589,148 @@ impl DiscordState {
             };
         }
         // Check if the channel is currently bridged
-        match db::get_telegram_chat_id(command.channel_id) {
-            Some(telegram_chat_id) => {
-                // Remove the bridge mapping
-                match db::remove_chat_mapping(db::RemovalChatId::Discord(command.channel_id)).await
-                {
-                    Ok(_) => {
-                        reply!("Successfully unbridged this channel from Telegram.");
-                        let telegram_notification = self.telegram_bot.send_message(
-                            telegram_chat_id,
-                            "The bridge to this channel has been removed.",
-                        );
-                        telegram_request!(telegram_notification.send_ref()).await;
-                    }
-                    Err(e) => {
-                        log::error!("Failed to remove chat mapping: {}", e);
-                        reply!(ephemeral: "Failed to unbridge channel. Please try again later.");
-                    }
-                }
+        let Some(telegram_chat_id) = db::get_telegram_chat_id(command.channel_id) else {
+            reply!(ephemeral: "This channel is not currently bridged to any Telegram chat.");
+            return;
+        };
+        // Remove the bridge mapping
+        match db::remove_chat_mapping(db::RemovalChatId::Discord(command.channel_id)).await {
+            Ok(()) => {
+                reply!("Successfully unbridged this channel from Telegram.");
+                let telegram_notification = self.telegram_bot.send_message(
+                    telegram_chat_id,
+                    "The bridge to this channel has been removed.",
+                );
+                telegram_request!(telegram_notification.send_ref()).await;
             }
-            None => {
-                reply!(ephemeral: "This channel is not currently bridged to any Telegram chat.")
+            Err(e) => {
+                log::error!("Failed to remove chat mapping: {}", e);
+                reply!(ephemeral: "Failed to unbridge channel. Please try again later.");
             }
         }
     }
 
+    async fn handle_hub_command(&self, ctx: &d::Context, command: &d::CommandInteraction) {
+        macro_rules! reply {
+            (internal: $r:expr, $ephem:expr) => {{
+                let r = $r;
+                let t: &str = r.as_ref();
+                discord_request!(command.create_response(
+                    &ctx.http,
+                    d::CreateInteractionResponse::Message(
+                        d::CreateInteractionResponseMessage::new()
+                            .content(t)
+                            .ephemeral($ephem),
+                    ),
+                ))
+                .await;
+            }};
+            ($r:expr $(,)?) => {reply!(internal: $r, false)};
+            (ephemeral: $r:expr $(,)?) => {
+                reply!(internal: $r, true)
+            };
+        }
+        let Some(guild_id) = command.guild_id else {
+            reply!(ephemeral: "Only servers (and not DMs or group DMs) can be made into hubs.");
+            return;
+        };
+        let Some(name) = command.data.options.get(0).and_then(|n| n.value.as_str()) else {
+            reply!(ephemeral: "Expected a name for the hub.");
+            return;
+        };
+        if name.contains(char::is_whitespace) || name == "" {
+            reply!(ephemeral: "Name cannot contain whitespace or be empty.");
+            return;
+        }
+        let category = match command.data.options().get(1) {
+            Some(d::ResolvedOption {
+                name: "hub_category",
+                value: d::ResolvedValue::Channel(c),
+                ..
+            }) => {
+                if !matches!(c.kind, d::ChannelType::Category) {
+                    reply!(ephemeral: "Hub category argument should be a category.");
+                    return;
+                }
+                Some(c.id)
+            }
+            Some(d::ResolvedOption {
+                name: "hub_category",
+                ..
+            }) => {
+                reply!(ephemeral: "Hub category argument should be a category.");
+                return;
+            }
+            _ => None,
+        };
+        let hub = match category {
+            Some(c) => db::Hub::Category(guild_id, c),
+            None => db::Hub::Server(guild_id),
+        };
+        match db::add_hub_server(name.to_string(), hub).await {
+            Ok(true) => reply!(format!(
+                "Successfully created hub named \"{name}\"! Use `/unhub` to undo."
+            )),
+            Ok(false) => {
+                reply!(ephemeral: format!("The name \"{name}\" is taken, try again with another name."))
+            }
+            Err(e) => {
+                log::error!("Failed to add hub with error {e}");
+                reply!(ephemeral: "Hub creation failed due to internal error. Please try again later.");
+            }
+        }
+    }
+    async fn handle_unhub_command(&self, ctx: &d::Context, command: &d::CommandInteraction) {
+        macro_rules! reply {
+            (internal: $r:expr, $ephem:expr) => {{
+                let r = $r;
+                let t: &str = r.as_ref();
+                discord_request!(command.create_response(
+                    &ctx.http,
+                    d::CreateInteractionResponse::Message(
+                        d::CreateInteractionResponseMessage::new()
+                            .content(t)
+                            .ephemeral($ephem),
+                    ),
+                ))
+                .await;
+            }};
+            ($r:expr $(,)?) => {reply!(internal: $r, false)};
+            (ephemeral: $r:expr $(,)?) => {
+                reply!(internal: $r, true)
+            };
+        }
+        let Some(guild_id) = command.guild_id else {
+            reply!(ephemeral: "Only servers (and not DMs or group DMs) can have hubs.");
+            return;
+        };
+        let Some(name) = command.data.options.get(0).and_then(|n| n.value.as_str()) else {
+            reply!(ephemeral: "Expected a name for the hub to remove.");
+            return;
+        };
+        if name.contains(char::is_whitespace) || name == "" {
+            reply!(ephemeral: "Name cannot contain whitespace or be empty.");
+            return;
+        }
+        match db::remove_hub_server(name, guild_id).await {
+            Ok(Some(db::Hub::Category(_, c))) => reply!(format!(
+                "Successfully removed hub named \"{name}\" for category <#{}>!",
+                u64::from(c)
+            )),
+            Ok(Some(db::Hub::Server(_))) => {
+                reply!(format!(
+                    "Successfully removed hub named \"{name}\" for this server!",
+                ))
+            }
+            Ok(None) => {
+                reply!(ephemeral: format!("No hub named \"{name}\" found for your server."))
+            }
+            Err(e) => {
+                log::error!("Failed to add hub with error {e}");
+                reply!(ephemeral: "Hub creation failed due to internal error. Please try again later.");
+            }
+        }
+    }
     async fn handle_bridge_autocomplete(
         &self,
         ctx: &d::Context,
@@ -586,6 +750,46 @@ impl DiscordState {
             vec![]
         };
 
+        if let Err(e) = ctx
+            .http
+            .create_interaction_response(
+                autocomplete.id,
+                &autocomplete.token,
+                &d::CreateInteractionResponse::Autocomplete(
+                    d::CreateAutocompleteResponse::new().set_choices(choices),
+                ),
+                vec![],
+            )
+            .await
+        {
+            log::error!("Failed to respond to autocomplete: {}", e);
+        }
+    }
+    async fn handle_unhub_autocomplete(
+        &self,
+        ctx: &d::Context,
+        autocomplete: &d::CommandInteraction,
+    ) {
+        let Some(guild_id) = autocomplete.guild_id else {
+            return;
+        };
+        let Some(auto) = autocomplete.data.autocomplete() else {
+            return;
+        };
+        let choices = db::hubs_for_server(guild_id);
+        let choices = choices
+            .into_iter()
+            .filter(|c| c.0.starts_with(auto.value))
+            .map(|(name, hub)| {
+                d::AutocompleteChoice::new(
+                    match hub {
+                        db::Hub::Category(_, c) => format!("{name} <#{}>", u64::from(c)),
+                        db::Hub::Server(_) => name.clone(),
+                    },
+                    name,
+                )
+            })
+            .collect::<Vec<_>>();
         if let Err(e) = ctx
             .http
             .create_interaction_response(
@@ -985,39 +1189,35 @@ impl d::EventHandler for DiscordState {
 
     async fn interaction_create(&self, ctx: d::Context, interaction: d::Interaction) {
         match interaction {
-            d::Interaction::Command(command) => {
-                if let Some(permissions) = command.channel.as_ref().and_then(|c| c.permissions) {
-                    if !permissions.manage_channels() {
-                        return match command
-                            .create_response(
-                                &ctx.http,
-                                d::CreateInteractionResponse::Message(
-                                    d::CreateInteractionResponseMessage::new()
-                                        .content("You need the 'Manage Channels' permission to use this command.")
-                                        .ephemeral(true),
-                                ),
-                            )
-                            .await
-                        {
-                            Ok(_) => (),
-                            Err(e) => log::error!("Failed to respond to command: {}", e),
-                        };
-                    }
+            d::Interaction::Command(command) => match command.data.name.as_str() {
+                "bridge" => self.handle_bridge_command(&ctx, &command).await,
+                "unbridge" => self.handle_unbridge_command(&ctx, &command).await,
+                "hub" => self.handle_hub_command(&ctx, &command).await,
+                "unhub" => self.handle_unhub_command(&ctx, &command).await,
+                "hubinfo" => {
+                    let info = "Creating a Hub allows people on Telegram who know the name of the hub to bridge channels to the hub. \
+                                A hub can be tied to the whole server or to a specific category.\n\
+                                You can have multiple hubs in the same server and even multiple hubs tied to the same category. \
+                                However, hub names must be globally unique, which means that someone could theoretically discover \
+                                your hub name by attempting to create hubs until they find which fails, then bridge channels to this hub.\n\
+                                However, doing so will only allow them to spam your hub with channels. It will *not* grant access \
+                                to any channels other than the created ones, which is why there is no current mitigation for the issue.\n\
+                                If it becomes an issue, report to the bot administrator.";
+                    discord_request!(command.create_response(
+                        &ctx.http,
+                        d::CreateInteractionResponse::Message(
+                            d::CreateInteractionResponseMessage::new().content(info),
+                        ),
+                    ))
+                    .await;
                 }
-                if command.data.name == "bridge" {
-                    self.handle_bridge_command(&ctx, &command).await;
-                }
-                match command.data.name.as_str() {
-                    "bridge" => self.handle_bridge_command(&ctx, &command).await,
-                    "unbridge" => self.handle_unbridge_command(&ctx, &command).await,
-                    _ => {}
-                }
-            }
-            d::Interaction::Autocomplete(autocomplete) => {
-                if autocomplete.data.name == "bridge" {
-                    self.handle_bridge_autocomplete(&ctx, &autocomplete).await;
-                }
-            }
+                _ => {}
+            },
+            d::Interaction::Autocomplete(autocomplete) => match autocomplete.data.name.as_str() {
+                "bridge" => self.handle_bridge_autocomplete(&ctx, &autocomplete).await,
+                "unhub" => self.handle_unhub_autocomplete(&ctx, &autocomplete).await,
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -1447,6 +1647,19 @@ async fn handle_telegram_bridge_command(bot: t::Bot, http: Arc<d::Http>, msg: &t
             let _ = telegram_request!(err.send_ref()).await;
         }};
     }
+    let Some(from) = &msg.from else { return };
+    let Some(from) = telegram_request!(bot.get_chat_member(msg.chat.id, from.id)).await else {
+        return;
+    };
+    if !from.can_manage_chat() {
+        reply!("Only administrators capable of managing the chat can create bridges.")
+    }
+    if let Some((prev_discord_id, _)) = db::get_discord_channel_id(msg.chat.id) {
+        reply!(format!(
+            "This chat is already linked to the discord chat with ID: {prev_discord_id}. Remove with /unbridge first."
+        ));
+        return;
+    }
     if target.contains(char::is_whitespace) || target == "" {
         reply!(
             "Usage: <code>/bridge &lthub name&gt</code> \
@@ -1503,9 +1716,44 @@ async fn handle_telegram_bridge_command(bot: t::Bot, http: Arc<d::Http>, msg: &t
     }
     reply!("Successfully created and linked channel.");
     let explanation = d::CreateMessage::new().content(format!(
-        "[Hub]: Someone bridged the telegram channel \"{chat_name}\" to this hub."
+        "[Hub]: Someone bridged the telegram channel \"{chat_name}\" to this hub. \
+        If this appears to be from someone you do not know, \
+        you should delete the hub and create a new one with a different name. \
+        Use `/hubinfo` for more info."
     ));
     let _ = discord_request!(ch.send_message(&http, explanation.clone())).await;
+}
+
+async fn handle_telegram_unbridge_command(bot: t::Bot, http: Arc<d::Http>, msg: &t::Message) {
+    macro_rules! reply {
+        ($err:expr $(,)?) => {{
+            let err = bot
+                .send_message(msg.chat.id, $err)
+                .parse_mode(t::ParseMode::Html)
+                .reply_parameters(t::ReplyParameters::new(msg.id));
+            let _ = telegram_request!(err.send_ref()).await;
+        }};
+    }
+    let Some(from) = &msg.from else { return };
+    let Some(from) = telegram_request!(bot.get_chat_member(msg.chat.id, from.id)).await else {
+        return;
+    };
+    if !from.can_manage_chat() {
+        reply!("Only administrators capable of managing the chat can create bridges.")
+    }
+    let Some((prev_discord_id, _)) = db::get_discord_channel_id(msg.chat.id) else {
+        reply!("This chat is not bridged to any chats.");
+        return;
+    };
+    if let Err(e) = db::remove_chat_mapping(db::RemovalChatId::Telegram(msg.chat.id)).await {
+        log::error!("Failed to remove chapping: {e}");
+        reply!("An internal error occurred trying to remove bridge.");
+        return;
+    }
+    reply!("Successfully removed bridge!");
+    let notification =
+        d::CreateMessage::new().content("The bridge to this channel has been removed.");
+    let _ = discord_request!(prev_discord_id.send_message(&http, notification.clone()));
 }
 
 async fn handle_update(
@@ -1549,6 +1797,9 @@ async fn handle_update(
         if let Some(text) = msg.text() {
             if text.starts_with("/bridge") {
                 handle_telegram_bridge_command(bot, discord_http, msg).await;
+                return Ok(());
+            } else if text == "/unbridge" {
+                handle_telegram_unbridge_command(bot, discord_http, msg).await;
                 return Ok(());
             }
         }
