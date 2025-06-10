@@ -2,31 +2,45 @@ use dashmap::DashMap;
 use eyre::Result;
 use lazy_static::lazy_static;
 use sqlx::{sqlite::SqlitePool, Row};
-use std::fs;
+use std::{fs, path};
 use toml::Table;
 
 const CHAT_MAPPING_FILE: &str = "chat_mappings.toml";
-const DATA_DIR: &str = "data/";
 
-pub async fn init_db(table: &str) -> Result<SqlitePool> {
-    use std::path::Path;
+#[derive(Clone)]
+pub struct Persist {
+    db: SqlitePool,
+}
 
-    let db_path = Path::new(DATA_DIR).join(table);
+pub struct PersistSettings<'a> {
+    db_name: &'a str,
+}
 
+async fn init_db(db_name: &str) -> Result<SqlitePool> {
+    let db_path = path::Path::new(db_name);
     // Create the database file if it doesn't exist
     if !db_path.exists() {
         std::fs::File::create(db_path)?;
     }
-    let pool = SqlitePool::connect(&format!("sqlite:{table}")).await?;
+    let pool = SqlitePool::connect(&format!("sqlite:{db_name}")).await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            has_files BOOLEAN NOT NULL DEFAULT 0,
+        )",
+    )
+    .execute(&pool)
+    .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS message_mapping (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            discord_message_id BIGINT NOT NULL,
-            telegram_message_id BIGINT NOT NULL,
-            telegram_chat_id BIGINT NOT NULL,
-            has_caption BOOLEAN NOT NULL DEFAULT 0,
+            internal_id INTEGER NOT NULL,
+            external_id TEXT NOT NULL,
+            portal INTEGER NOT NULL,
+            PRIMARY KEY (internal_id, portal),
+            FOREIGN KEY (internal_id) REFERENCES messages(id)
         )",
     )
     .execute(&pool)
@@ -50,279 +64,76 @@ pub async fn init_db(table: &str) -> Result<SqlitePool> {
     Ok(pool)
 }
 
-use crate::discord as d;
-use crate::telegram as t;
+use crate::model::{ExternAuthorId, ExternMessageId, Message, MessageId, PortalId};
 
-pub async fn insert_mapping(
-    pool: &SqlitePool,
-    discord_message_id: d::MessageId,
-    telegram_message_id: t::MessageId,
-    telegram_chat_id: t::ChatId,
-    has_caption: bool,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO message_mapping (discord_message_id, telegram_message_id, telegram_chat_id, has_caption) VALUES (?, ?, ?, ?)",
-    )
-    .bind(i64::from(discord_message_id))
-    .bind(telegram_message_id.0 as i64)
-    .bind(telegram_chat_id.0)
-    .bind(has_caption)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn get_telegram_message_id(
-    pool: &SqlitePool,
-    discord_message_id: d::MessageId,
-) -> Result<Vec<(t::MessageId, bool)>> {
-    let result = sqlx::query(
-        "SELECT telegram_message_id, has_caption FROM message_mapping WHERE discord_message_id = ?",
-    )
-    .bind(i64::from(discord_message_id))
-    .fetch_all(pool)
-    .await?;
-
-    Ok(result
-        .into_iter()
-        .map(|row| {
-            (
-                t::MessageId(row.get::<i64, _>(0) as i32),
-                row.get::<bool, _>(1),
-            )
+impl Persist {
+    pub async fn init(PersistSettings { db_name }: PersistSettings<'_>) -> Result<Self> {
+        Ok(Self {
+            db: init_db(db_name).await?,
         })
-        .collect())
-}
+    }
 
-pub async fn get_discord_message_id(
-    pool: &SqlitePool,
-    telegram_message_id: t::MessageId,
-    telegram_chat_id: t::ChatId,
-) -> Result<Vec<d::MessageId>> {
-    let result = sqlx::query(
-        "SELECT discord_message_id FROM message_mapping WHERE telegram_message_id = ? AND telegram_chat_id = ?",
-    )
-    .bind(telegram_message_id.0 as i64)
-    .bind(telegram_chat_id.0)
-    .fetch_all(pool)
-    .await?;
+    pub async fn insert_message(&self, msg: &Message) -> Result<MessageId> {
+        let id: i64 =
+            sqlx::query_scalar("INSERT INTO messages (has_files) VALUES (?) RETURNING id")
+                .bind(!msg.1.attachments.is_empty())
+                .fetch_one(&self.db)
+                .await?;
+        Ok(MessageId(id as u64))
+    }
 
-    Ok(result
-        .into_iter()
-        .map(|row| d::MessageId::from(row.get::<i64, _>(0) as u64))
-        .collect())
-}
-
-pub async fn delete_by_discord(
-    pool: &SqlitePool,
-    discord_message_id: d::MessageId,
-) -> Result<Vec<t::MessageId>> {
-    let result = sqlx::query(
-        "DELETE FROM message_mapping WHERE discord_message_id = ? RETURNING telegram_message_id",
-    )
-    .bind(i64::from(discord_message_id))
-    .fetch_all(pool)
-    .await?;
-
-    Ok(result
-        .into_iter()
-        .map(|row| t::MessageId(row.get::<i64, _>(0) as i32))
-        .collect())
-}
-
-pub async fn delete_by_telegram(
-    pool: &SqlitePool,
-    telegram_message_id: t::MessageId,
-    telegram_chat_id: t::ChatId,
-) -> Result<Vec<d::MessageId>> {
-    let result = sqlx::query(
-        "DELETE FROM message_mapping WHERE telegram_message_id = ? AND telegram_chat_id = ? RETURNING discord_message_id",
-    )
-    .bind(telegram_message_id.0 as i64)
-    .bind(telegram_chat_id.0)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(result
-        .into_iter()
-        .map(|row| d::MessageId::from(row.get::<i64, _>(0) as u64))
-        .collect())
-}
-
-pub async fn insert_reaction_mapping(
-    pool: &SqlitePool,
-    discord_message_id: d::MessageId,
-    telegram_message_id: t::MessageId,
-    telegram_chat_id: t::ChatId,
-    reactions: &str,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT OR REPLACE INTO reaction_mapping (discord_message_id, telegram_message_id, telegram_chat_id, reactions) VALUES (?, ?, ?, ?)",
-    )
-    .bind(i64::from(discord_message_id))
-    .bind(telegram_message_id.0 as i64)
-    .bind(telegram_chat_id.0)
-    .bind(reactions)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn get_telegram_reaction_message_id(
-    pool: &SqlitePool,
-    discord_message_id: d::MessageId,
-) -> Result<Option<(t::MessageId, String)>> {
-    let result = sqlx::query_as::<_, (i64, String)>(
-        "SELECT telegram_message_id, reactions FROM reaction_mapping WHERE discord_message_id = ?",
-    )
-    .bind(i64::from(discord_message_id))
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(result.map(|(id, reactions)| (t::MessageId(id as i32), reactions)))
-}
-
-pub async fn get_discord_reaction_message_id(
-    pool: &SqlitePool,
-    telegram_message_id: t::MessageId,
-    telegram_chat_id: t::ChatId,
-) -> Result<Option<(d::MessageId, String)>> {
-    let result = sqlx::query_as::<_, (i64, String)>(
-        "SELECT discord_message_id, reactions FROM reaction_mapping WHERE telegram_message_id = ? AND telegram_chat_id = ?",
-    )
-    .bind(telegram_message_id.0 as i64)
-    .bind(telegram_chat_id.0)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(result.map(|(id, reactions)| (d::MessageId::from(id as u64), reactions)))
-}
-
-pub async fn update_telegram_reaction_mapping(
-    pool: &SqlitePool,
-    discord_message_id: d::MessageId,
-    reactions: &str,
-) -> Result<()> {
-    sqlx::query("UPDATE reaction_mapping SET reactions = ? WHERE discord_message_id = ?")
-        .bind(reactions)
-        .bind(i64::from(discord_message_id))
-        .execute(pool)
+    pub async fn add_message_mapping(
+        &self,
+        id: MessageId,
+        portal: PortalId,
+        ext_id: ExternMessageId,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO message_mapping (internal_id, external_id, portal) VALUES (?, ?, ?)",
+        )
+        .bind(id.0 as i64)
+        .bind(ext_id.as_ref())
+        .bind(portal.raw() as i64)
+        .execute(&self.db)
         .await?;
+        Ok(())
+    }
 
-    Ok(())
-}
-
-pub async fn update_discord_reaction_mapping(
-    pool: &SqlitePool,
-    telegram_message_id: t::MessageId,
-    telegram_chat_id: t::ChatId,
-    reactions: &str,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE reaction_mapping SET reactions = ? WHERE telegram_message_id = ? AND telegram_chat_id = ?",
-    )
-    .bind(reactions)
-    .bind(telegram_message_id.0 as i64)
-    .bind(telegram_chat_id.0)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn remove_reaction_mapping_by_discord(
-    pool: &SqlitePool,
-    discord_message_id: d::MessageId,
-) -> Result<()> {
-    sqlx::query("DELETE FROM reaction_mapping WHERE discord_message_id = ?")
-        .bind(i64::from(discord_message_id))
-        .execute(pool)
+    pub async fn get_message_id(
+        &self,
+        ext_id: ExternMessageId,
+        portal: PortalId,
+    ) -> Result<MessageId> {
+        let id: i64 = sqlx::query_scalar(
+            "SELECT internal_id FROM message_mapping WHERE external_id = ? AND portal = ?",
+        )
+        .bind(ext_id.as_ref())
+        .bind(portal.raw() as i64)
+        .fetch_one(&self.db)
         .await?;
+        Ok(MessageId(id as u64))
+    }
 
-    Ok(())
+    pub async fn get_messages_for_portal(
+        &self,
+        id: MessageId,
+        portal: PortalId,
+    ) -> Result<Vec<ExternMessageId>> {
+        let rows = sqlx::query(
+            "SELECT external_id FROM message_mapping WHERE internal_id = ? AND portal = ?",
+        )
+        .bind(id.0 as i64)
+        .bind(portal.raw() as i64)
+        .fetch_all(&self.db)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                ExternMessageId::from({
+                    let s: String = r.get(0);
+                    s
+                })
+            })
+            .collect())
+    }
 }
-
-pub async fn remove_reaction_mapping_by_telegram(
-    pool: &SqlitePool,
-    telegram_message_id: t::MessageId,
-    telegram_chat_id: t::ChatId,
-) -> Result<()> {
-    sqlx::query(
-        "DELETE FROM reaction_mapping WHERE telegram_message_id = ? AND telegram_chat_id = ?",
-    )
-    .bind(telegram_message_id.0 as i64)
-    .bind(telegram_chat_id.0)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-// fn load_chat_mappings() -> Result<()> {
-//     if !std::path::Path::new(CHAT_MAPPING_FILE).exists() {
-//         fs::write(CHAT_MAPPING_FILE, "")?;
-//     }
-
-//     let content = fs::read_to_string(CHAT_MAPPING_FILE)?;
-//     let mappings: Table = toml::from_str(&content)?;
-
-//     for (discord_channel_id, telegram_chat_id) in mappings.iter() {
-//         let discord_channel_id = d::ChannelId::from(discord_channel_id.parse::<u64>()?);
-//         let vals = telegram_chat_id.as_array().unwrap();
-//         let telegram_chat_id = t::ChatId(vals[0].as_integer().unwrap() as i64);
-//         let webhook_url = vals.get(1).and_then(|v| v.as_str()).map(String::from);
-
-//         DISCORD_TO_TELEGRAM_CACHE.insert(discord_channel_id, telegram_chat_id);
-//         TELEGRAM_TO_DISCORD_CACHE.insert(telegram_chat_id, (discord_channel_id, webhook_url));
-//     }
-
-//     Ok(())
-// }
-
-// fn save_chat_mappings() -> Result<()> {
-//     let mut mappings = Table::new();
-
-//     for entry in TELEGRAM_TO_DISCORD_CACHE.iter() {
-//         let mut out = vec![toml::Value::Integer(entry.key().0.into())];
-//         if let Some(webhook_url) = entry.value().1.clone() {
-//             out.push(toml::Value::String(webhook_url));
-//         }
-//         mappings.insert(entry.value().0.to_string(), toml::Value::Array(out));
-//     }
-
-//     let toml_string = toml::to_string(&mappings)?;
-//     fs::write(CHAT_MAPPING_FILE, toml_string)?;
-
-//     Ok(())
-// }
-
-// pub async fn set_chat_mapping(
-//     discord_channel_id: d::ChannelId,
-//     telegram_chat_id: t::ChatId,
-//     webhook_url: Option<String>,
-// ) -> Result<()> {
-//     // Insert new mapping
-//     DISCORD_TO_TELEGRAM_CACHE.insert(discord_channel_id, telegram_chat_id);
-//     TELEGRAM_TO_DISCORD_CACHE.insert(telegram_chat_id, (discord_channel_id, webhook_url));
-
-//     // Save the updated mappings to the TOML file
-//     save_chat_mappings()?;
-
-//     Ok(())
-// }
-
-// pub fn get_telegram_chat_id(discord_channel_id: d::ChannelId) -> Option<t::ChatId> {
-//     DISCORD_TO_TELEGRAM_CACHE
-//         .get(&discord_channel_id)
-//         .map(|v| *v)
-// }
-
-// pub fn get_discord_channel_id(
-//     telegram_chat_id: t::ChatId,
-// ) -> Option<(d::ChannelId, Option<String>)> {
-//     TELEGRAM_TO_DISCORD_CACHE
-//         .get(&telegram_chat_id)
-//         .map(|v| v.clone())
-// }

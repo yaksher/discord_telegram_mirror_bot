@@ -1,4 +1,5 @@
-use eyre::Result;
+use crate::db;
+use eyre::{bail, eyre, Result};
 use serde::{Deserialize, Serialize};
 use serenity::async_trait;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ pub enum RichText {
     Italic(Box<RichText>),
     Strikethrough(Box<RichText>),
     Blockquote(Box<RichText>),
-    Fixed(String),
+    FixedWidth(String),
     Hyperlink {
         text: String,
         link: Url,
@@ -49,8 +50,8 @@ impl_id! {
     AuthorId,
 }
 
-pub type ExternAuthorId = String;
-pub type ExternMessageId = String;
+pub type ExternAuthorId = Arc<str>;
+pub type ExternMessageId = Arc<str>;
 
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum FileData {
@@ -96,17 +97,12 @@ pub struct MessageData {
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
-pub struct ExternMessageMeta {
+pub struct MessageMeta {
     pub reply_to: Option<(ExternMessageId, MessageData)>,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
-pub struct MessageMeta {
-    pub reply_to: Option<MessageId>,
-}
-
-#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
-pub struct Message(MessageMeta, MessageData);
+pub struct Message(pub MessageMeta, pub MessageData);
 
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Reaction {
@@ -118,7 +114,7 @@ const EVENTS_CHANNEL_SIZE: usize = 16; // arbitrary
 
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum EventKind {
-    Message(ExternMessageMeta, MessageData),
+    Message(Message),
     MessageDelete,
     MessageEdit { from: Option<Message>, to: Message },
     ReactionAdd(Reaction),
@@ -134,85 +130,138 @@ pub struct Event {
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct PortalId(u64);
 
+impl PortalId {
+    pub fn raw(&self) -> u64 {
+        self.0
+    }
+}
+
 #[async_trait]
 pub trait Portal {
     fn id(&self) -> PortalId;
     async fn start(&self, id: PortalId, events: mpsc::Sender<(PortalId, Event)>);
-    async fn message(
-        &self,
-        ath_id: AuthorId,
-        id: MessageId,
-        msg: Message,
-    ) -> Result<Vec<ExternMessageId>>;
-    async fn message_delete(&self, ath_id: AuthorId, id: MessageId) -> Result<()>;
+    async fn message(&self, msg: Message) -> Result<Vec<ExternMessageId>>;
+    async fn message_delete(&self, id: ExternMessageId) -> Result<()>;
     async fn message_edit(
         &self,
-        ath_id: AuthorId,
-        id: MessageId,
+        id: ExternMessageId,
         from: Option<Message>,
         to: Message,
     ) -> Result<()>;
-    async fn reaction_add(&self, ath_id: AuthorId, id: MessageId, reaction: Reaction)
-        -> Result<()>;
-    async fn reaction_remove(
-        &self,
-        ath_id: AuthorId,
-        id: MessageId,
-        reaction: Reaction,
-    ) -> Result<()>;
+    async fn reaction_add(&self, id: ExternMessageId, reaction: Reaction) -> Result<()>;
+    async fn reaction_remove(&self, id: ExternMessageId, reaction: Reaction) -> Result<()>;
 }
 
-#[allow(unused_variables, unreachable_code)]
-pub async fn run(name: String, portals: Vec<Box<dyn Portal>>) {
+async fn handle_event<P>(
+    persist: &db::Persist,
+    portals: &[P],
+    source: PortalId,
+    event: Event,
+) -> Result<()>
+where
+    P: std::ops::Deref<Target = dyn Portal>,
+{
+    let Event {
+        author_id: _src_ath_id,
+        msg_id: src_msg_id,
+        kind,
+    } = event;
+
+    use EventKind as EK;
+    let result = if let EK::Message(msg) = kind.clone() {
+        let internal_msg_id = persist.insert_message(&msg).await?;
+        persist
+            .add_message_mapping(internal_msg_id, source, src_msg_id)
+            .await?;
+        let Message(meta, data) = msg;
+        let reply_to_info = match &meta.reply_to {
+            Some((id, data)) => Some((persist.get_message_id(id.clone(), source).await?, data)),
+            None => None,
+        };
+        futures::future::join_all(portals.iter().filter(|p| p.id() != source).map(|p| async {
+            let reply_to = match reply_to_info {
+                Some((id, data)) => {
+                    let Some(reply_msg_id) = persist
+                        .get_messages_for_portal(id.clone(), source)
+                        .await?
+                        .get(0)
+                        .cloned()
+                    else {
+                        bail!("No messages found for {id:?}, {:?}", p.id());
+                    };
+                    Some((reply_msg_id, data.clone()))
+                }
+                None => None,
+            };
+            let meta = MessageMeta { reply_to };
+            let msg = Message(meta, data.clone());
+            let result = p.message(msg).await;
+            match result {
+                Ok(extern_ids) => {
+                    for id in extern_ids {
+                        persist
+                            .add_message_mapping(internal_msg_id, p.id(), id)
+                            .await?;
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }))
+        .await
+    } else {
+        let internal_msg_id = persist.get_message_id(src_msg_id.clone(), source).await?;
+        futures::future::join_all(portals.iter().filter(|p| p.id() != source).map(|p| async {
+            let ext_msg_ids = persist
+                .get_messages_for_portal(internal_msg_id, p.id())
+                .await?;
+            let ext_msg_id = ext_msg_ids.get(0).cloned().ok_or(eyre!(
+                "No messages found for {internal_msg_id:?}, {:?}",
+                p.id()
+            ))?;
+            match kind.clone() {
+                EK::MessageDelete => {
+                    // TODO: delete message from database
+                    for ext_msg_id in ext_msg_ids {
+                        p.message_delete(ext_msg_id).await?;
+                    }
+                    Ok(())
+                }
+                EK::MessageEdit { from, to } => p.message_edit(ext_msg_id, from, to).await,
+                // TODO: update reaction mappings rather than making the portal do it
+                EK::ReactionAdd(reaction) => p.reaction_add(ext_msg_id, reaction).await,
+                // TODO: update reaction mappings rather than making the portal do it
+                EK::ReactionRemove(reaction) => p.reaction_remove(ext_msg_id, reaction).await,
+                EK::Message(_) => unreachable!(),
+            }
+        }))
+        .await
+    };
+    let errs = result
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.err().map(|e| (i, e)))
+        .map(|(i, e)| format!("Portal {i}: {e}"))
+        .collect::<Vec<_>>();
+    if !errs.is_empty() {
+        bail!("Errors for portals: {}", errs.join("\n"));
+    }
+    Ok(())
+}
+pub async fn run<P>(persist: db::Persist, portals: &[P])
+where
+    P: std::ops::Deref<Target = dyn Portal>,
+{
     let (events_in, mut events) = mpsc::channel(EVENTS_CHANNEL_SIZE);
     for (i, portal) in portals.iter().enumerate() {
         portal.start(PortalId(i as u64), events_in.clone()).await
     }
-    while let Some((
-        sender,
-        Event {
-            author_id,
-            msg_id,
-            kind,
-        },
-    )) = events.recv().await
-    {
-        use EventKind as EK;
-        let ath_id = todo!();
-        let msg_id = todo!();
-        futures::future::join_all(portals.iter().filter(|p| p.id() != sender).map(
-            |portal| async {
-                match kind.clone() {
-                    EK::Message(meta, data) => {
-                        let meta = todo!(); // canonicalize meta via db
-                        let msg = Message(meta, data);
-                        let result = portal.message(ath_id, msg_id, msg).await;
-                        match result {
-                            Ok(extern_ids) => {
-                                todo!(
-                                    "Handle external message IDs: {:?}",
-                                    extern_ids
-                                        .into_iter()
-                                        .map(|x| x.to_string())
-                                        .collect::<Vec<_>>()
-                                );
-                            }
-                            Err(e) => Err(e),
-                        }
-                    }
-                    EK::MessageDelete => portal.message_delete(ath_id, msg_id).await,
-                    EK::MessageEdit { from, to } => {
-                        portal.message_edit(ath_id, msg_id, from, to).await
-                    }
-                    EK::ReactionAdd(reaction) => {
-                        portal.reaction_add(ath_id, msg_id, reaction).await
-                    }
-                    EK::ReactionRemove(reaction) => {
-                        portal.reaction_remove(ath_id, msg_id, reaction).await
-                    }
-                }
-            },
-        ))
-        .await;
+    while let Some((source, event)) = events.recv().await {
+        match handle_event(&persist, portals, source, event).await {
+            Ok(()) => (),
+            Err(e) => {
+                eprintln!("Error handling event: {e:?}");
+            }
+        }
     }
 }
