@@ -1575,21 +1575,20 @@ async fn reply_info(
     }
 }
 
-fn unicode_keycap(digit: usize) -> &'static str {
-    [
-        "\u{0030}\u{fe0f}\u{20e3}",
-        "\u{0031}\u{fe0f}\u{20e3}",
-        "\u{0032}\u{fe0f}\u{20e3}",
-        "\u{0033}\u{fe0f}\u{20e3}",
-        "\u{0034}\u{fe0f}\u{20e3}",
-        "\u{0035}\u{fe0f}\u{20e3}",
-        "\u{0036}\u{fe0f}\u{20e3}",
-        "\u{0037}\u{fe0f}\u{20e3}",
-        "\u{0038}\u{fe0f}\u{20e3}",
-        "\u{0039}\u{fe0f}\u{20e3}",
-        // "\u{1f51f}",
-    ][digit]
-}
+const KEYCAPS: [&str; 12] = [
+    "\u{0030}\u{fe0f}\u{20e3}",
+    "\u{0031}\u{fe0f}\u{20e3}",
+    "\u{0032}\u{fe0f}\u{20e3}",
+    "\u{0033}\u{fe0f}\u{20e3}",
+    "\u{0034}\u{fe0f}\u{20e3}",
+    "\u{0035}\u{fe0f}\u{20e3}",
+    "\u{0036}\u{fe0f}\u{20e3}",
+    "\u{0037}\u{fe0f}\u{20e3}",
+    "\u{0038}\u{fe0f}\u{20e3}",
+    "\u{0039}\u{fe0f}\u{20e3}",
+    "\u{1f51f}",
+    "\u{1f520}",
+];
 
 async fn send_poll(
     webhook: d::Webhook,
@@ -1605,12 +1604,17 @@ async fn send_poll(
             (_, true) => "Poll (multiple)",
         })
         .description(&poll.question)
-        .fields(
-            poll.options
-                .iter()
-                .enumerate()
-                .map(|(i, opt)| (format!("Option {}", i), &opt.text, false)),
-        );
+        .fields(poll.options.iter().enumerate().map(|(i, opt)| {
+            (
+                if i < KEYCAPS.len() {
+                    format!("Option {}", KEYCAPS[i])
+                } else {
+                    format!("Option {}", i)
+                },
+                &opt.text,
+                false,
+            )
+        }));
     let mut builder = d::ExecuteWebhook::new().username(author).embed(embed);
     if let Ok(Some(avatar_url)) = avatar_handle.await {
         builder = builder.avatar_url(&*avatar_url);
@@ -1622,11 +1626,11 @@ async fn send_poll(
     .await
     .flatten();
     if let Some(msg) = &discord_result {
-        for i in 0..poll.options.len() {
+        for i in 0..poll.options.len().min(KEYCAPS.len()) {
             _ = msg
                 .react(
                     &discord_http,
-                    d::ReactionType::Unicode(unicode_keycap(i).to_string()),
+                    d::ReactionType::Unicode(KEYCAPS[i].to_string()),
                 )
                 .await;
         }
