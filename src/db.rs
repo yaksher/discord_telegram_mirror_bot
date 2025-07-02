@@ -458,19 +458,29 @@ pub enum RemovalChatId {
     Discord(d::ChannelId),
     Telegram(t::ChatId),
 }
-pub async fn remove_chat_mapping(id: RemovalChatId) -> Result<()> {
-    match id {
+pub async fn remove_chat_mapping(
+    id: RemovalChatId,
+) -> Result<(t::ChatId, d::ChannelId, Option<String>)> {
+    let removed = match id {
         RemovalChatId::Discord(id) => {
-            DISCORD_TO_TELEGRAM_CACHE.remove(&id);
+            let Some(removed) = DISCORD_TO_TELEGRAM_CACHE.remove(&id).map(|(_, v)| v) else {
+                eyre::bail!("No mapping found for Discord channel {id}");
+            };
             TELEGRAM_TO_DISCORD_CACHE.retain(|_, (stored_id, _)| *stored_id != id);
+            (removed, id, None)
         }
         RemovalChatId::Telegram(id) => {
-            TELEGRAM_TO_DISCORD_CACHE.remove(&id);
+            let Some((removed, webhook)) = TELEGRAM_TO_DISCORD_CACHE.remove(&id).map(|(_, v)| v)
+            else {
+                eyre::bail!("No mapping found for Telegram chat {id}");
+            };
             DISCORD_TO_TELEGRAM_CACHE.retain(|_, stored_id| *stored_id != id);
+            (id, removed, webhook)
         }
-    }
+    };
 
-    save_config().await
+    save_config().await?;
+    Ok(removed)
 }
 
 pub async fn admins() -> Vec<d::UserId> {

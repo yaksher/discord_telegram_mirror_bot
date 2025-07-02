@@ -599,7 +599,7 @@ impl DiscordState {
         };
         // Remove the bridge mapping
         match db::remove_chat_mapping(db::RemovalChatId::Discord(command.channel_id)).await {
-            Ok(()) => {
+            Ok(_) => {
                 reply!("Successfully unbridged this channel from Telegram.");
                 let telegram_notification = self.telegram_bot.send_message(
                     telegram_chat_id,
@@ -1812,6 +1812,26 @@ async fn handle_update(
                 handle_telegram_unbridge_command(bot, discord_http, msg).await;
                 return Ok(());
             }
+        } else if let Some(&t::ChatMigration::To { chat_id }) = msg.chat_migration() {
+            // chat was migrated to a supergroup
+            if let Err(e) = db::update_chat_membership(&db, telegram_chat.id, &title, false).await {
+                log::error!("Failed to update chat membership: {e:?}");
+            }
+            if let Err(e) = db::update_chat_membership(&db, chat_id, &title, is_member).await {
+                log::error!("Failed to update chat membership: {e:?}");
+            }
+            match db::remove_chat_mapping(db::RemovalChatId::Telegram(telegram_chat.id)).await {
+                Ok((_, discord_chat, webhook)) => {
+                    if let Err(e) = db::set_chat_mapping(discord_chat, chat_id, webhook).await {
+                        log::error!("Failed to set chat mapping: {e:?}");
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to remove chat mapping: {e:?}");
+                }
+            }
+
+            return Ok(());
         }
     }
     let Some((discord_chat, webhook_url)) = db::get_discord_channel_id(telegram_chat.id) else {
