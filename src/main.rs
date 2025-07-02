@@ -1275,7 +1275,7 @@ async fn get_telegram_attachment_as_discord(
         .await;
         return None;
     }
-    let file = match bot.get_file(file.id.as_str()).await {
+    let file = match bot.get_file(file.id).await {
         Ok(file) => file,
         Err(e) => {
             log::error!("Failed to get file: {e:?}");
@@ -1341,7 +1341,7 @@ async fn telegram_avatar_url_by_id(
             .get(0)
             .and_then(|sizes| sizes.iter().last().cloned())
     })?;
-    let file = telegram_request!(bot.get_file(&photo.file.id)).await?;
+    let file = telegram_request!(bot.get_file(photo.file.id.clone())).await?;
     let t::File {
         path,
         meta: t::FileMeta { size, .. },
