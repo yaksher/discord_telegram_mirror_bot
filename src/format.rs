@@ -146,7 +146,7 @@ pub fn telegram_to_discord_format(content: &str, entities: Vec<t::MessageEntityR
             t::MessageEntityKind::Pre { language } => {
                 insert(
                     &entity,
-                    format!("```{}", language.as_deref().unwrap_or("")),
+                    format!("```{}\n", language.as_deref().unwrap_or("")),
                     "```".to_string(),
                 );
             }
