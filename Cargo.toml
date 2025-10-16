@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 tokio = { version =  "*", features = ["rt-multi-thread", "macros"] }
 sqlx = { version = "0.8.5", features = [ "runtime-tokio-rustls", "sqlite", "macros", "chrono" ] }
-teloxide = { version = "0.16.0", features = ["macros"] }
+teloxide = { version = "0.17.0", features = ["macros"] }
 log = "0.4"
 pretty_env_logger = "0.5.0"
 dotenv = "0.15.0"
@@ -18,7 +18,7 @@ discord-md = "3.0.0"
 url = "2.5.2"
 futures = "0.3.30"
 dashmap = "6.0.1"
-toml = "0.8.15"
+toml = "0.9.8"
 base64 = "0.22.1"
 
 
@@ -28,7 +28,6 @@ default-features = false
 features = ["builder", "cache", "client", "gateway", "http", "model", "utils", "rustls_backend"]
 git = "https://github.com/serenity-rs/serenity.git"
 branch = "current"
-# version = "0.12.4"
 
 [patch.crates-io]
 discord-md = { path = "discord-md"}
