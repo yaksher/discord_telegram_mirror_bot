@@ -598,7 +598,7 @@ impl DiscordState {
             return;
         };
         // Remove the bridge mapping
-        match db::remove_chat_mapping(db::RemovalChatId::Discord(command.channel_id)).await {
+        match db::remove_chat_mapping(db::EitherChatId::Discord(command.channel_id)).await {
             Ok(_) => {
                 reply!("Successfully unbridged this channel from Telegram.");
                 let telegram_notification = self.telegram_bot.send_message(
@@ -1066,6 +1066,9 @@ impl d::EventHandler for DiscordState {
         {
             return;
         }
+        if !db::should_forward_reactions(db::EitherChatId::Discord(reaction.channel_id)) {
+            return;
+        }
         let Some(telegram_chat) = db::get_telegram_chat_id(reaction.channel_id) else {
             log::info!("Got reaction {reaction:?} in unregistered discord channel");
             return;
@@ -1141,6 +1144,9 @@ impl d::EventHandler for DiscordState {
     }
 
     async fn reaction_remove(&self, ctx: d::Context, reaction: d::Reaction) {
+        if !db::should_forward_reactions(db::EitherChatId::Discord(reaction.channel_id)) {
+            return;
+        }
         let Some(telegram_chat) = db::get_telegram_chat_id(reaction.channel_id) else {
             log::info!("Got reaction {reaction:?} in unregistered discord channel");
             return;
@@ -1755,7 +1761,7 @@ async fn handle_telegram_unbridge_command(bot: t::Bot, http: Arc<d::Http>, msg: 
         reply!("This chat is not bridged to any chats.");
         return;
     };
-    if let Err(e) = db::remove_chat_mapping(db::RemovalChatId::Telegram(msg.chat.id)).await {
+    if let Err(e) = db::remove_chat_mapping(db::EitherChatId::Telegram(msg.chat.id)).await {
         log::error!("Failed to remove chapping: {e}");
         reply!("An internal error occurred trying to remove bridge.");
         return;
@@ -1820,7 +1826,7 @@ async fn handle_update(
             if let Err(e) = db::update_chat_membership(&db, chat_id, &title, is_member).await {
                 log::error!("Failed to update chat membership: {e:?}");
             }
-            match db::remove_chat_mapping(db::RemovalChatId::Telegram(telegram_chat.id)).await {
+            match db::remove_chat_mapping(db::EitherChatId::Telegram(telegram_chat.id)).await {
                 Ok((_, discord_chat, webhook)) => {
                     if let Err(e) = db::set_chat_mapping(discord_chat, chat_id, webhook).await {
                         log::error!("Failed to set chat mapping: {e:?}");
@@ -2135,6 +2141,9 @@ async fn handle_update(
             }
         }
         t::UpdateKind::MessageReaction(reaction) => {
+            if !db::should_forward_reactions(db::EitherChatId::Telegram(telegram_chat.id)) {
+                return Ok(());
+            }
             let telegram_id = reaction.message_id;
             let discord_id = match db::get_discord_message_id(&db, telegram_id, telegram_chat.id)
                 .await

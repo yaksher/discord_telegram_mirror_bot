@@ -22,10 +22,23 @@ impl Hub {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TelegramEntry {
+    chat_id: t::ChatId,
+    receive_reactions: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscordEntry {
+    channel_id: d::ChannelId,
+    webhook_url: Option<String>,
+    send_reactions: bool,
+    receive_reactions: bool,
+}
+
 lazy_static! {
-    static ref DISCORD_TO_TELEGRAM_CACHE: DashMap<d::ChannelId, t::ChatId> = DashMap::new();
-    static ref TELEGRAM_TO_DISCORD_CACHE: DashMap<t::ChatId, (d::ChannelId, Option<String>)> =
-        DashMap::new();
+    static ref DISCORD_TO_TELEGRAM_CACHE: DashMap<d::ChannelId, TelegramEntry> = DashMap::new();
+    static ref TELEGRAM_TO_DISCORD_CACHE: DashMap<t::ChatId, DiscordEntry> = DashMap::new();
     static ref ADMINS: tokio::sync::RwLock<Vec<d::UserId>> = vec![].into();
     static ref DISCORD_IMAGE_CHANNEL: tokio::sync::RwLock<Option<d::ChannelId>> = None.into();
     static ref HUBS: DashMap<String, Hub> = DashMap::new();
@@ -302,15 +315,103 @@ async fn load_config() -> Result<()> {
     let config: Table = toml::from_str(&content)?;
 
     // Load chat mappings
-    if let Some(chat_mappings) = config.get("chat_mappings").and_then(|v| v.as_table()) {
-        for (discord_channel_id, telegram_chat_id) in chat_mappings {
-            let discord_channel_id = d::ChannelId::from(discord_channel_id.parse::<u64>()?);
-            let vals = telegram_chat_id.as_array().unwrap();
-            let telegram_chat_id = t::ChatId(vals[0].as_integer().unwrap() as i64);
-            let webhook_url = vals.get(1).and_then(|v| v.as_str()).map(String::from);
+    if let Some(chat_mappings) = config.get("chat_mappings") {
+        match chat_mappings {
+            // old format
+            toml::Value::Table(chat_mappings) => {
+                for (discord_channel_id, telegram_chat_id) in chat_mappings {
+                    let discord_channel_id = d::ChannelId::from(discord_channel_id.parse::<u64>()?);
+                    let vals = telegram_chat_id.as_array().unwrap();
+                    let telegram_chat_id = t::ChatId(vals[0].as_integer().unwrap() as i64);
+                    let webhook_url = vals.get(1).and_then(|v| v.as_str()).map(String::from);
 
-            DISCORD_TO_TELEGRAM_CACHE.insert(discord_channel_id, telegram_chat_id);
-            TELEGRAM_TO_DISCORD_CACHE.insert(telegram_chat_id, (discord_channel_id, webhook_url));
+                    DISCORD_TO_TELEGRAM_CACHE.insert(
+                        discord_channel_id,
+                        TelegramEntry {
+                            chat_id: telegram_chat_id,
+                            receive_reactions: true,
+                        },
+                    );
+                    TELEGRAM_TO_DISCORD_CACHE.insert(
+                        telegram_chat_id,
+                        DiscordEntry {
+                            channel_id: discord_channel_id,
+                            webhook_url,
+                            send_reactions: true,
+                            receive_reactions: true,
+                        },
+                    );
+                }
+            }
+            // new format
+            toml::Value::Array(chat_mappings) => {
+                for chat_mapping in chat_mappings {
+                    if let Some(chat_mapping) = chat_mapping.as_table() {
+                        let discord_channel_id = d::ChannelId::from(
+                            chat_mapping
+                                .get("discord_channel_id")
+                                .unwrap()
+                                .as_integer()
+                                .unwrap() as u64,
+                        );
+                        let telegram_chat_id = t::ChatId(
+                            chat_mapping
+                                .get("telegram_chat_id")
+                                .unwrap()
+                                .as_integer()
+                                .unwrap() as i64,
+                        );
+                        let webhook_url = chat_mapping
+                            .get("webhook_url")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let reactions_forwarding = if let Some(reactions_forwarding) =
+                            chat_mapping.get("reactions_forwarding")
+                        {
+                            match reactions_forwarding {
+                                toml::Value::Array(a) => {
+                                    if a.len() != 2 {
+                                        panic!("Invalid reactions forwarding mode: {a:?}");
+                                    }
+                                    let t_to_d = a[0].as_bool().unwrap();
+                                    let d_to_t = a[1].as_bool().unwrap();
+                                    (t_to_d, d_to_t)
+                                }
+                                toml::Value::Boolean(true) => (true, true),
+                                toml::Value::Boolean(false) => (false, false),
+                                toml::Value::String(s) => match s.as_str() {
+                                    "both" => (true, true),
+                                    "t->d" => (true, false),
+                                    "d->t" => (false, true),
+                                    _ => panic!("Invalid reactions forwarding mode: {s}"),
+                                },
+                                _ => panic!(
+                                    "Invalid reactions forwarding mode: {reactions_forwarding:?}"
+                                ),
+                            }
+                        } else {
+                            (true, true)
+                        };
+                        DISCORD_TO_TELEGRAM_CACHE.insert(
+                            discord_channel_id,
+                            TelegramEntry {
+                                chat_id: telegram_chat_id,
+                                receive_reactions: reactions_forwarding.1,
+                            },
+                        );
+                        TELEGRAM_TO_DISCORD_CACHE.insert(
+                            telegram_chat_id,
+                            DiscordEntry {
+                                channel_id: discord_channel_id,
+                                webhook_url,
+                                send_reactions: reactions_forwarding.1,
+                                receive_reactions: reactions_forwarding.0,
+                            },
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -365,7 +466,7 @@ async fn load_config() -> Result<()> {
 }
 
 async fn save_config() -> Result<()> {
-    let mut mappings = Table::new();
+    let mut mappings = vec![];
 
     use toml::Value;
 
@@ -374,11 +475,24 @@ async fn save_config() -> Result<()> {
     }
 
     for entry in TELEGRAM_TO_DISCORD_CACHE.iter() {
-        let mut out = vec![Value::Integer(entry.key().0)];
-        if let Some(webhook_url) = entry.value().1.clone() {
-            out.push(Value::String(webhook_url));
-        }
-        mappings.insert(entry.value().0.to_string(), Value::Array(out));
+        let mut mapping = Table::new();
+        mapping.insert("telegram_chat_id".to_string(), int(entry.key().0 as u64));
+        mapping.insert(
+            "discord_channel_id".to_string(),
+            int(entry.value().channel_id),
+        );
+        mapping.insert(
+            "webhook_url".to_string(),
+            Value::String(entry.value().webhook_url.clone().unwrap_or_default()),
+        );
+        mapping.insert(
+            "receive_reactions".to_string(),
+            Value::Array(vec![
+                Value::Boolean(entry.value().receive_reactions),
+                Value::Boolean(entry.value().send_reactions),
+            ]),
+        );
+        mappings.push(Value::Table(mapping));
     }
 
     let mut hubs = Table::new();
@@ -402,7 +516,7 @@ async fn save_config() -> Result<()> {
         options.insert("image_channel".to_string(), int(*image_channel));
     }
     let mut config = Table::new();
-    config.insert("chat_mappings".to_string(), Value::Table(mappings));
+    config.insert("chat_mappings".to_string(), Value::Array(mappings));
     config.insert("options".to_string(), Value::Table(options));
 
     let toml_string = toml::to_string(&config)?;
@@ -447,35 +561,60 @@ pub async fn set_chat_mapping(
     webhook_url: Option<String>,
 ) -> Result<()> {
     // Insert new mapping
-    DISCORD_TO_TELEGRAM_CACHE.insert(discord_channel_id, telegram_chat_id);
-    TELEGRAM_TO_DISCORD_CACHE.insert(telegram_chat_id, (discord_channel_id, webhook_url));
+    DISCORD_TO_TELEGRAM_CACHE.insert(
+        discord_channel_id,
+        TelegramEntry {
+            chat_id: telegram_chat_id,
+            receive_reactions: true,
+        },
+    );
+    TELEGRAM_TO_DISCORD_CACHE.insert(
+        telegram_chat_id,
+        DiscordEntry {
+            channel_id: discord_channel_id,
+            webhook_url,
+            send_reactions: true,
+            receive_reactions: true,
+        },
+    );
 
     // Save the updated mappings to the TOML file
     save_config().await
 }
 
-pub enum RemovalChatId {
+#[derive(Debug)]
+pub enum EitherChatId {
     Discord(d::ChannelId),
     Telegram(t::ChatId),
 }
 pub async fn remove_chat_mapping(
-    id: RemovalChatId,
+    id: EitherChatId,
 ) -> Result<(t::ChatId, d::ChannelId, Option<String>)> {
     let removed = match id {
-        RemovalChatId::Discord(id) => {
+        EitherChatId::Discord(id) => {
             let Some(removed) = DISCORD_TO_TELEGRAM_CACHE.remove(&id).map(|(_, v)| v) else {
                 eyre::bail!("No mapping found for Discord channel {id}");
             };
-            TELEGRAM_TO_DISCORD_CACHE.retain(|_, (stored_id, _)| *stored_id != id);
-            (removed, id, None)
+            TELEGRAM_TO_DISCORD_CACHE.retain(
+                |_,
+                 DiscordEntry {
+                     channel_id: stored_id,
+                     ..
+                 }| *stored_id != id,
+            );
+            (removed.chat_id, id, None)
         }
-        RemovalChatId::Telegram(id) => {
-            let Some((removed, webhook)) = TELEGRAM_TO_DISCORD_CACHE.remove(&id).map(|(_, v)| v)
-            else {
+        EitherChatId::Telegram(id) => {
+            let Some(removed) = TELEGRAM_TO_DISCORD_CACHE.remove(&id).map(|(_, v)| v) else {
                 eyre::bail!("No mapping found for Telegram chat {id}");
             };
-            DISCORD_TO_TELEGRAM_CACHE.retain(|_, stored_id| *stored_id != id);
-            (id, removed, webhook)
+            DISCORD_TO_TELEGRAM_CACHE.retain(
+                |_,
+                 TelegramEntry {
+                     chat_id: stored_id, ..
+                 }| *stored_id != id,
+            );
+            (id, removed.channel_id, removed.webhook_url)
         }
     };
 
@@ -494,7 +633,7 @@ pub async fn discord_image_channel() -> Option<d::ChannelId> {
 pub fn get_telegram_chat_id(discord_channel_id: d::ChannelId) -> Option<t::ChatId> {
     DISCORD_TO_TELEGRAM_CACHE
         .get(&discord_channel_id)
-        .map(|v| *v)
+        .map(|v| v.chat_id)
 }
 
 pub fn get_discord_channel_id(
@@ -502,7 +641,20 @@ pub fn get_discord_channel_id(
 ) -> Option<(d::ChannelId, Option<String>)> {
     TELEGRAM_TO_DISCORD_CACHE
         .get(&telegram_chat_id)
-        .map(|v| v.clone())
+        .map(|v| (v.channel_id, v.webhook_url.clone()))
+}
+
+pub fn should_forward_reactions(from: EitherChatId) -> bool {
+    match from {
+        EitherChatId::Discord(id) => DISCORD_TO_TELEGRAM_CACHE
+            .get(&id)
+            .map(|v| v.receive_reactions)
+            .unwrap_or(true),
+        EitherChatId::Telegram(id) => TELEGRAM_TO_DISCORD_CACHE
+            .get(&id)
+            .map(|v| v.receive_reactions)
+            .unwrap_or(true),
+    }
 }
 
 pub async fn get_telegram_chats(
